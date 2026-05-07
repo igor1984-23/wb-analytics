@@ -10,8 +10,8 @@ VALID_PASSWORD = "secret123"
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-# Функция расчёта
-def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
+# Функция расчёта (принимает словари расходов по каждому артикулу)
+def calculate_unit_economy(df, purchase_dict, ad_dict):
     df.columns = df.columns.str.strip().str.lower()
     
     # Поиск колонок
@@ -66,9 +66,10 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
         net_revenue = sales_amount + returns_amount - total_wb_costs
         
-        # Расчёт с учётом закупки и рекламы
-        purchase_total = sales_count * purchase_per_unit
-        final_profit = net_revenue - purchase_total - ad_cost_total
+        # Берём расходы конкретно для этого артикула (если ввели)
+        purchase_total = sales_count * purchase_dict.get(sku, 0.0)
+        ad_total = ad_dict.get(sku, 0.0)
+        final_profit = net_revenue - purchase_total - ad_total
         
         result.append({
             "Артикул": sku,
@@ -78,7 +79,7 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             "Расходы WB": total_wb_costs,
             "Чистая выручка WB": net_revenue,
             "Закупка (всего)": purchase_total,
-            "Реклама (всего)": ad_cost_total,
+            "Реклама (всего)": ad_total,
             "Реальная прибыль": final_profit,
             "Убыточен?": "ДА" if final_profit < 0 else "НЕТ"
         })
@@ -114,31 +115,61 @@ if uploaded_file is not None:
         with st.expander("📄 Предпросмотр загруженных данных"):
             st.dataframe(df.head())
         
-        # === НОВЫЕ ПОЛЯ ДЛЯ РУЧНОГО ВВОДА ===
-        st.subheader("💰 Введите дополнительные расходы")
+        # Определяем уникальные артикулы
+        # Нормализуем названия колонок для поиска колонки с артикулами
+        temp_df = df.copy()
+        temp_df.columns = temp_df.columns.str.strip().str.lower()
+        sku_col = None
+        for col in temp_df.columns:
+            if "артикул" in col or "sku" in col:
+                sku_col = col
+                break
         
-        col1, col2 = st.columns(2)
-        with col1:
-            purchase_per_unit = st.number_input(
-                "Закупка (себестоимость 1 единицы)", 
-                min_value=0.0, 
-                value=300.0,
-                step=50.0,
-                help="Сколько вы платите за одну штуку товара поставщику"
-            )
-        with col2:
-            ad_cost_total = st.number_input(
-                "Реклама (общая сумма за период)", 
-                min_value=0.0, 
-                value=1000.0,
-                step=500.0,
-                help="Сколько вы потратили на рекламу за эту неделю"
-            )
+        if sku_col is None:
+            st.error("Не удалось найти колонку с артикулами")
+            st.stop()
+        
+        unique_skus = temp_df[sku_col].unique().tolist()
+        
+        st.subheader("💰 Введите расходы по каждому товару")
+        st.info("Заполните только нужные поля. Если поле оставить пустым — расход будет считаться как 0.")
+        
+        purchase_dict = {}
+        ad_dict = {}
+        
+        # Создаём таблицу для ввода данных по каждому артикулу
+        for sku in unique_skus:
+            with st.container():
+                st.markdown(f"**{sku}**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    purchase_val = st.number_input(
+                        f"Закупка (себест. 1 ед.) — {sku}",
+                        min_value=0.0,
+                        value=0.0,
+                        step=50.0,
+                        key=f"purchase_{sku}",
+                        help=f"Сколько вы платите за одну штуку {sku}"
+                    )
+                    if purchase_val > 0:
+                        purchase_dict[sku] = purchase_val
+                
+                with col2:
+                    ad_val = st.number_input(
+                        f"Реклама (общая за период) — {sku}",
+                        min_value=0.0,
+                        value=0.0,
+                        step=200.0,
+                        key=f"ad_{sku}",
+                        help=f"Сколько потрачено на рекламу {sku} за эту неделю"
+                    )
+                    if ad_val > 0:
+                        ad_dict[sku] = ad_val
         
         # Кнопка запуска расчёта
         if st.button("🧮 Рассчитать реальную прибыль", type="primary"):
             with st.spinner("Идёт расчёт..."):
-                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
+                result_df = calculate_unit_economy(df, purchase_dict, ad_dict)
             
             if result_df is not None and not result_df.empty:
                 st.subheader("📈 Результат расчёта")
