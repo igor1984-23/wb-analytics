@@ -47,6 +47,38 @@ def send_registration_email(name, tg_username, contact):
         print(f"Ошибка отправки email: {e}")
         return False
 
+def send_feedback_email(user_name, user_tg, user_contact, feedback_type, feedback_text):
+    """Отправляет обратную связь на почту с идентификацией пользователя"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_LOGIN
+        msg['To'] = RECIPIENT_EMAIL
+        msg['Subject'] = f"[ОС] {feedback_type}: {user_name}"
+        
+        body = f"""
+        <h3>Обратная связь от пользователя</h3>
+        <p><strong>Время:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+        <p><strong>Имя:</strong> {user_name}</p>
+        <p><strong>Telegram:</strong> {user_tg}</p>
+        <p><strong>Контакт:</strong> {user_contact}</p>
+        <p><strong>Тип:</strong> {feedback_type}</p>
+        <hr>
+        <p><strong>Сообщение:</strong></p>
+        <p>{feedback_text}</p>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_LOGIN, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Ошибка отправки feedback: {e}")
+        return False
+
 # Инициализация состояния
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -79,7 +111,6 @@ if not st.session_state.registered:
         
         if submitted:
             if name and tg_username and contact:
-                # Отправляем на почту
                 email_sent = send_registration_email(name, tg_username, contact)
                 
                 if email_sent:
@@ -114,6 +145,38 @@ if not st.session_state.authenticated:
         else:
             st.error("Неверный логин или пароль")
     st.stop()
+
+# ========== БОКОВАЯ ПАНЕЛЬ (после входа) ==========
+with st.sidebar:
+    st.markdown(f"### 👤 {st.session_state.visitor_name}")
+    st.markdown(f"📱 {st.session_state.visitor_tg}")
+    st.markdown(f"📧 {st.session_state.visitor_contact}")
+    st.markdown("---")
+    
+    # ========== ФОРМА ОБРАТНОЙ СВЯЗИ ==========
+    with st.expander("💬 Отправить обратную связь"):
+        feedback_type = st.selectbox(
+            "Тип обращения",
+            ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"]
+        )
+        feedback_text = st.text_area("Ваше сообщение", height=150)
+        
+        if st.button("📨 Отправить", type="primary"):
+            if feedback_text.strip():
+                with st.spinner("Отправка..."):
+                    sent = send_feedback_email(
+                        st.session_state.visitor_name,
+                        st.session_state.visitor_tg,
+                        st.session_state.visitor_contact,
+                        feedback_type,
+                        feedback_text
+                    )
+                if sent:
+                    st.success("✅ Спасибо! Ваше сообщение отправлено.")
+                else:
+                    st.error("❌ Ошибка отправки. Попробуйте позже или напишите в Telegram.")
+            else:
+                st.error("Пожалуйста, напишите сообщение")
 
 # ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
 st.title("📊 Аналитик Wildberries")
