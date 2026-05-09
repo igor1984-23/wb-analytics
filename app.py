@@ -5,6 +5,8 @@ from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import os
+import hashlib
 
 # ========== НАСТРОЙКИ ДОСТУПА ==========
 VALID_USERNAME = "analitik"
@@ -18,6 +20,41 @@ EMAIL_LOGIN = "wb_analitics@mail.ru"
 EMAIL_PASSWORD = "cyoqc6SpdSIUzRkjp3He"
 RECIPIENT_EMAIL = "wb_analitics@mail.ru"
 # =======================================
+
+# Файл для хранения зарегистрированных пользователей
+USERS_FILE = "registered_users.csv"
+
+def init_users_file():
+    """Создаёт файл пользователей, если его нет"""
+    if not os.path.exists(USERS_FILE):
+        df = pd.DataFrame(columns=["Имя", "Telegram", "Контакт", "Дата_регистрации"])
+        df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
+
+def is_user_registered(tg_username):
+    """Проверяет, зарегистрирован ли пользователь"""
+    if not os.path.exists(USERS_FILE):
+        return False
+    df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
+    return tg_username in df["Telegram"].values
+
+def save_registration_to_csv(name, tg_username, contact):
+    """Сохраняет регистрацию в CSV-файл"""
+    init_users_file()
+    df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
+    
+    # Проверяем, нет ли уже такого пользователя
+    if tg_username in df["Telegram"].values:
+        return True
+    
+    new_row = pd.DataFrame([{
+        "Имя": name,
+        "Telegram": tg_username,
+        "Контакт": contact,
+        "Дата_регистрации": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
+    return True
 
 def send_registration_email(name, tg_username, contact):
     """Отправляет данные регистрации на почту"""
@@ -48,7 +85,7 @@ def send_registration_email(name, tg_username, contact):
         return False
 
 def send_feedback_email(user_name, user_tg, user_contact, feedback_type, feedback_text):
-    """Отправляет обратную связь на почту с идентификацией пользователя"""
+    """Отправляет обратную связь на почту"""
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_LOGIN
@@ -79,7 +116,7 @@ def send_feedback_email(user_name, user_tg, user_contact, feedback_type, feedbac
         print(f"Ошибка отправки feedback: {e}")
         return False
 
-# ========== ФУНКЦИЯ РАСЧЁТА (с учётом ручных расходов) ==========
+# ========== ФУНКЦИЯ РАСЧЁТА ==========
 def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
     df.columns = df.columns.str.strip().str.lower()
     
@@ -133,7 +170,6 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
         net_revenue = sales_amount + returns_amount - total_wb_costs
         
-        # Расчёт с учётом закупки и рекламы
         purchase_total = sales_count * purchase_per_unit
         final_profit = net_revenue - purchase_total - ad_cost_total
         
@@ -155,78 +191,97 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
 # Инициализация состояния
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
-if "registered" not in st.session_state:
-    st.session_state.registered = False
-if "visitor_name" not in st.session_state:
-    st.session_state.visitor_name = ""
-if "visitor_tg" not in st.session_state:
-    st.session_state.visitor_tg = ""
-if "visitor_contact" not in st.session_state:
-    st.session_state.visitor_contact = ""
+if "user_data" not in st.session_state:
+    st.session_state.user_data = None
 
 st.set_page_config(page_title="Аналитик WB", page_icon="📊")
 
-# ========== ФОРМА РЕГИСТРАЦИИ ==========
-if not st.session_state.registered:
-    st.title("📊 Аналитик Wildberries")
-    st.markdown("### Добро пожаловать!")
-    st.markdown("Сервис автоматически анализирует отчёты WB и показывает убыточные товары.")
-    
-    st.markdown("---")
-    st.markdown("#### Пожалуйста, представьтесь для получения доступа")
-    
-    with st.form("registration_form"):
-        name = st.text_input("Ваше имя")
-        tg_username = st.text_input("Telegram username (или @ник)")
-        contact = st.text_input("Email или телефон")
-        
-        submitted = st.form_submit_button("Получить доступ")
-        
-        if submitted:
-            if name and tg_username and contact:
-                email_sent = send_registration_email(name, tg_username, contact)
-                
-                if email_sent:
-                    st.success("✅ Спасибо! Данные отправлены. Теперь вы можете войти в сервис.")
-                else:
-                    st.warning("⚠️ Данные сохранены, но письмо не отправилось. Вход всё равно открыт.")
-                
-                st.session_state.visitor_name = name
-                st.session_state.visitor_tg = tg_username
-                st.session_state.visitor_contact = contact
-                st.session_state.registered = True
-                st.rerun()
-            else:
-                st.error("Пожалуйста, заполните все поля")
-    
-    st.markdown("---")
-    st.caption("Ваши данные нужны только для обратной связи. Спам не рассылаем.")
-    st.stop()
-
-# ========== АВТОРИЗАЦИЯ ==========
+# ========== ВЫБОР РЕЖИМА (НОВЫЙ / ВЕРНУЛСЯ) ==========
 if not st.session_state.authenticated:
-    st.title("🔐 Вход в сервис")
-    st.markdown(f"Добро пожаловать, **{st.session_state.visitor_name}**!")
+    st.title("📊 Аналитик Wildberries")
     
-    username = st.text_input("Логин")
-    password = st.text_input("Пароль", type="password")
+    mode = st.radio(
+        "У вас уже есть доступ?",
+        ["🔐 Я новый пользователь", "👋 Я уже зарегистрирован"],
+        horizontal=True
+    )
     
-    if st.button("Войти"):
-        if username == VALID_USERNAME and password == VALID_PASSWORD:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Неверный логин или пароль")
+    # ========== НОВЫЙ ПОЛЬЗОВАТЕЛЬ ==========
+    if mode == "🔐 Я новый пользователь":
+        st.markdown("### Добро пожаловать!")
+        st.markdown("Сервис автоматически анализирует отчёты WB и показывает убыточные товары.")
+        
+        st.markdown("---")
+        st.markdown("#### Пожалуйста, представьтесь для получения доступа")
+        
+        with st.form("registration_form"):
+            name = st.text_input("Ваше имя")
+            tg_username = st.text_input("Telegram username (или @ник)")
+            contact = st.text_input("Email или телефон")
+            
+            submitted = st.form_submit_button("Получить доступ")
+            
+            if submitted:
+                if name and tg_username and contact:
+                    # Сохраняем в CSV
+                    save_registration_to_csv(name, tg_username, contact)
+                    # Отправляем на почту
+                    send_registration_email(name, tg_username, contact)
+                    
+                    st.session_state.user_data = {
+                        "name": name,
+                        "tg": tg_username,
+                        "contact": contact
+                    }
+                    st.success("✅ Спасибо! Теперь войдите в сервис.")
+                    st.rerun()
+                else:
+                    st.error("Пожалуйста, заполните все поля")
+    
+    # ========== ВЕРНУВШИЙСЯ ПОЛЬЗОВАТЕЛЬ ==========
+    else:
+        st.markdown("#### Введите ваши данные для входа")
+        
+        tg_input = st.text_input("Telegram username (или @ник)")
+        password_input = st.text_input("Пароль сервиса", type="password")
+        
+        if st.button("Войти"):
+            if password_input == VALID_PASSWORD:
+                if is_user_registered(tg_input):
+                    # Загружаем данные пользователя из CSV
+                    df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
+                    user_row = df[df["Telegram"] == tg_input].iloc[0]
+                    st.session_state.user_data = {
+                        "name": user_row["Имя"],
+                        "tg": tg_input,
+                        "contact": user_row["Контакт"]
+                    }
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("❌ Вы не зарегистрированы. Пожалуйста, выберите «Я новый пользователь»")
+            else:
+                st.error("Неверный пароль")
+    
     st.stop()
 
-# ========== БОКОВАЯ ПАНЕЛЬ (после входа) ==========
+# ========== ОСНОВНОЙ ИНТЕРФЕЙС (после входа) ==========
+# Боковая панель
 with st.sidebar:
-    st.markdown(f"### 👤 {st.session_state.visitor_name}")
-    st.markdown(f"📱 {st.session_state.visitor_tg}")
-    st.markdown(f"📧 {st.session_state.visitor_contact}")
+    st.markdown(f"### 👤 {st.session_state.user_data['name']}")
+    st.markdown(f"📱 {st.session_state.user_data['tg']}")
+    st.markdown(f"📧 {st.session_state.user_data['contact']}")
     st.markdown("---")
     
-    # ========== ФОРМА ОБРАТНОЙ СВЯЗИ ==========
+    # Кнопка выхода
+    if st.button("🚪 Выйти"):
+        for key in st.session_state.keys():
+            del st.session_state[key]
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # Форма обратной связи
     with st.expander("💬 Отправить обратную связь"):
         feedback_type = st.selectbox(
             "Тип обращения",
@@ -238,24 +293,24 @@ with st.sidebar:
             if feedback_text.strip():
                 with st.spinner("Отправка..."):
                     sent = send_feedback_email(
-                        st.session_state.visitor_name,
-                        st.session_state.visitor_tg,
-                        st.session_state.visitor_contact,
+                        st.session_state.user_data["name"],
+                        st.session_state.user_data["tg"],
+                        st.session_state.user_data["contact"],
                         feedback_type,
                         feedback_text
                     )
                 if sent:
                     st.success("✅ Спасибо! Ваше сообщение отправлено.")
                 else:
-                    st.error("❌ Ошибка отправки. Попробуйте позже или напишите в Telegram.")
+                    st.error("❌ Ошибка отправки. Попробуйте позже.")
             else:
                 st.error("Пожалуйста, напишите сообщение")
 
-# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
+# ========== ОСНОВНОЙ КОНТЕНТ ==========
 st.title("📊 Аналитик Wildberries")
-st.write(f"Здравствуйте, **{st.session_state.visitor_name}**!")
+st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
 
-# ========== РУЧНОЙ ВВОД РАСХОДОВ ==========
+# Ручной ввод расходов
 st.subheader("💰 Введите дополнительные расходы")
 
 col1, col2 = st.columns(2)
@@ -264,16 +319,14 @@ with col1:
         "Закупка (себестоимость 1 единицы)", 
         min_value=0.0, 
         value=300.0,
-        step=50.0,
-        help="Сколько вы платите за одну штуку товара поставщику"
+        step=50.0
     )
 with col2:
     ad_cost_total = st.number_input(
         "Реклама (общая сумма за период)", 
         min_value=0.0, 
         value=1000.0,
-        step=500.0,
-        help="Сколько вы потратили на рекламу за эту неделю"
+        step=500.0
     )
 
 st.markdown("---")
@@ -281,7 +334,6 @@ st.write("Загрузите отчёт WB в формате Excel — полу�
 
 uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
 
-# Обработка загруженного файла
 if uploaded_file is not None:
     try:
         df = pd.read_excel(uploaded_file)
