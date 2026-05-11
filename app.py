@@ -13,7 +13,7 @@ import hashlib
 VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "admin"
 
-# ВАША РЕАЛЬНАЯ ССЫЛКА (исправлено)
+# ВАША РЕАЛЬНАЯ ССЫЛКА (замените на свою)
 BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
@@ -32,10 +32,9 @@ def init_files():
         df = pd.DataFrame(columns=["Имя", "Username", "Email", "Телефон", "Дата_регистрации", "Статус"])
         df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
     else:
-        # Проверяем, есть ли колонка Статус
         df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
         if "Статус" not in df.columns:
-            df["Статус"] = "confirmed"  # Для старых пользователей
+            df["Статус"] = "confirmed"
             df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
     
     if not os.path.exists(VERIFICATION_TOKENS_FILE):
@@ -214,6 +213,7 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         sales_count = len(sales)
         sales_amount = sales[amount_col].sum()
         returns = sku_data[sku_data[doc_type_col].str.contains("возврат", case=False, na=False)]
+        returns_count = len(returns)
         returns_amount = returns[amount_col].sum()
         logistics_sum = sku_data[logistics_col].sum()
         storage_sum = sku_data[storage_col].sum()
@@ -223,6 +223,27 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         net_revenue = sales_amount + returns_amount - total_wb_costs
         purchase_total = sales_count * purchase_per_unit
         final_profit = net_revenue - purchase_total - ad_cost_total
+        
+        # Генерация подсказки
+        if final_profit >= 0:
+            hint = f"✅ Товар прибыльный. Реальная прибыль: {final_profit} ₽. Выручка WB ({net_revenue} ₽) покрывает все расходы."
+        else:
+            reasons = []
+            if logistics_sum > 0:
+                reasons.append(f"логистика {logistics_sum} ₽")
+            if returns_count > 0:
+                reasons.append(f"{returns_count} возвратов на сумму {abs(returns_amount)} ₽")
+            if penalties_sum > 0:
+                reasons.append(f"штрафы {penalties_sum} ₽")
+            if storage_sum > 0:
+                reasons.append(f"хранение {storage_sum} ₽")
+            if purchase_total > 0:
+                reasons.append(f"закупка {purchase_total} ₽")
+            if ad_cost_total > 0:
+                reasons.append(f"реклама {ad_cost_total} ₽")
+            reason_text = ", ".join(reasons) if reasons else "различные расходы"
+            hint = f"❌ Убыток: {final_profit} ₽. Основные причины: {reason_text}."
+        
         result.append({
             "Артикул": sku,
             "Продано, шт": sales_count,
@@ -233,8 +254,10 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             "Закупка (всего)": purchase_total,
             "Реклама (всего)": ad_cost_total,
             "Реальная прибыль": final_profit,
-            "Убыточен?": "ДА" if final_profit < 0 else "НЕТ"
+            "Убыточен?": "ДА" if final_profit < 0 else "НЕТ",
+            "Комментарий": hint
         })
+    
     return pd.DataFrame(result)
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -315,7 +338,7 @@ if not st.session_state.authenticated:
                 st.error("Неверный пароль")
     st.stop()
 
-# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
+# ========== БОКОВАЯ ПАНЕЛЬ ==========
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.user_data['name']}")
     st.markdown(f"🔑 {st.session_state.user_data['username']}")
@@ -339,6 +362,7 @@ with st.sidebar:
             send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], feedback_type, feedback_text)
             st.success("✅ Отправлено!")
 
+# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
 st.title("📊 Аналитик Wildberries")
 st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
 
@@ -357,19 +381,30 @@ if uploaded_file is not None:
         if st.button("🧮 Рассчитать"):
             result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
             if result_df is not None:
-                def highlight_loss(row):
-                    return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
-                st.dataframe(result_df.style.apply(highlight_loss, axis=1))
-                loss_df = result_df[result_df['Убыточен?'] == 'ДА']
-                if not loss_df.empty:
-                    st.subheader("🔴 Убыточные товары")
-                    st.dataframe(loss_df)
-                else:
-                    st.info("✅ Убыточных товаров не найдено")
+                st.subheader("📈 Результат расчёта")
+                
+                # Отображаем таблицу с подсказками
+                for idx, row in result_df.iterrows():
+                    if row["Убыточен?"] == "ДА":
+                        st.markdown(f"🔴 **{row['Артикул']}** — убыток: {row['Реальная прибыль']} ₽")
+                        with st.expander("ℹ️ Почему убыток?"):
+                            st.info(row["Комментарий"])
+                    else:
+                        st.markdown(f"🟢 **{row['Артикул']}** — прибыль: {row['Реальная прибыль']} ₽")
+                        with st.expander("ℹ️ Детали"):
+                            st.success(row["Комментарий"])
+                
+                # Показываем также таблицу для тех, кто хочет видеть все данные
+                with st.expander("📋 Показать полную таблицу"):
+                    def highlight_loss(row):
+                        return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
+                    st.dataframe(result_df.style.apply(highlight_loss, axis=1))
+                
+                # Кнопка скачать
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     result_df.to_excel(writer, sheet_name='Анализ', index=False)
-                st.download_button("📥 Скачать отчёт", data=output.getvalue(), file_name="unit_economy.xlsx")
+                st.download_button("📥 Скачать отчёт (Excel)", data=output.getvalue(), file_name="unit_economy.xlsx")
     except Exception as e:
         st.error(f"Ошибка: {e}")
 
