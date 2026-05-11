@@ -12,7 +12,9 @@ import hashlib
 # ========== НАСТРОЙКИ ==========
 VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "admin"
-BASE_URL = "https://wb-analytics-igor1984-23.streamlit.app"  # ЗАМЕНИТЕ НА ВАШУ ССЫЛКУ
+
+# ВАША РЕАЛЬНАЯ ССЫЛКА (исправлено)
+BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
 SMTP_PORT = 587
@@ -102,15 +104,12 @@ def verify_token(token):
     if token_row.empty:
         return False
     email = token_row.iloc[0]["Email"]
-    # Проверка времени (24 часа)
     created = datetime.strptime(token_row.iloc[0]["Создан"], "%Y-%m-%d %H:%M:%S")
     if (datetime.now() - created).total_seconds() > 86400:
         return False
-    # Обновляем статус
     df_users = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
     df_users.loc[df_users["Email"] == email, "Статус"] = "confirmed"
     df_users.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
-    # Удаляем токен
     df_tokens = df_tokens[df_tokens["Token"] != token]
     df_tokens.to_csv(VERIFICATION_TOKENS_FILE, index=False, encoding="utf-8-sig")
     return True
@@ -136,7 +135,7 @@ def send_verification_email(user_email, username, name, token):
         server.quit()
         return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки: {e}")
         return False
 
 def send_admin_notification(name, username, email, phone):
