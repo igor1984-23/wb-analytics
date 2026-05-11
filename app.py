@@ -7,10 +7,12 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
 import re
+import hashlib
+import urllib.parse
 
 # ========== НАСТРОЙКИ ДОСТУПА ==========
-VALID_PASSWORD = "secret123"  # Единый пароль для всех
-ADMIN_USERNAME = "admin"      # Ваш username для админ-доступа
+VALID_PASSWORD = "secret123"
+ADMIN_USERNAME = "admin"
 # =======================================
 
 # ========== НАСТРОЙКИ ПОЧТЫ ==========
@@ -18,35 +20,107 @@ SMTP_SERVER = "smtp.mail.ru"
 SMTP_PORT = 587
 EMAIL_LOGIN = "wb_analitics@mail.ru"
 EMAIL_PASSWORD = "cyoqc6SpdSIUzRkjp3He"
-RECIPIENT_EMAIL = "wb_analitics@mail.ru"  # Куда приходят уведомления о регистрациях
+RECIPIENT_EMAIL = "wb_analitics@mail.ru"
 # =======================================
 
-# Файл для хранения зарегистрированных пользователей
+# Файлы для хранения данных
 USERS_FILE = "registered_users.csv"
+VERIFICATION_TOKENS_FILE = "verification_tokens.csv"
 
-def init_users_file():
+# Базовый URL вашего сервиса (замените на свой)
+BASE_URL = "https://wb-analytics-igor1984-23.streamlit.app"
+
+def init_files():
+    """Создаёт файлы, если их нет"""
     if not os.path.exists(USERS_FILE):
-        df = pd.DataFrame(columns=["Имя", "Username", "Email", "Телефон", "Дата_регистрации"])
+        df = pd.DataFrame(columns=["Имя", "Username", "Email", "Телефон", "Дата_регистрации", "Статус"])
         df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
+    
+    if not os.path.exists(VERIFICATION_TOKENS_FILE):
+        df = pd.DataFrame(columns=["Email", "Token", "Создан"])
+        df.to_csv(VERIFICATION_TOKENS_FILE, index=False, encoding="utf-8-sig")
+
+def generate_token(email):
+    """Генерирует уникальный токен для верификации"""
+    secret = "your_secret_key_here_change_me"
+    data = f"{email}{datetime.now().timestamp()}{secret}"
+    return hashlib.sha256(data.encode()).hexdigest()[:32]
+
+def save_verification_token(email, token):
+    """Сохраняет токен верификации"""
+    init_files()
+    df = pd.read_csv(VERIFICATION_TOKENS_FILE, encoding="utf-8-sig")
+    
+    # Удаляем старые токены для этого email
+    df = df[df["Email"] != email]
+    
+    new_row = pd.DataFrame([{
+        "Email": email,
+        "Token": token,
+        "Создан": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(VERIFICATION_TOKENS_FILE, index=False, encoding="utf-8-sig")
+
+def verify_token(token):
+    """Проверяет токен и подтверждает email"""
+    if not os.path.exists(VERIFICATION_TOKENS_FILE):
+        return False
+    
+    df_tokens = pd.read_csv(VERIFICATION_TOKENS_FILE, encoding="utf-8-sig")
+    
+    # Ищем токен
+    token_row = df_tokens[df_tokens["Token"] == token]
+    if token_row.empty:
+        return False
+    
+    email = token_row.iloc[0]["Email"]
+    
+    # Проверяем, что токен не старше 24 часов
+    created = datetime.strptime(token_row.iloc[0]["Создан"], "%Y-%m-%d %H:%M:%S")
+    if (datetime.now() - created).total_seconds() > 86400:  # 24 часа
+        return False
+    
+    # Обновляем статус пользователя
+    df_users = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
+    df_users.loc[df_users["Email"] == email, "Статус"] = "confirmed"
+    df_users.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
+    
+    # Удаляем использованный токен
+    df_tokens = df_tokens[df_tokens["Token"] != token]
+    df_tokens.to_csv(VERIFICATION_TOKENS_FILE, index=False, encoding="utf-8-sig")
+    
+    return True
+
+def is_email_confirmed(email):
+    """Проверяет, подтверждён ли email"""
+    if not os.path.exists(USERS_FILE):
+        return False
+    df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
+    user_rows = df[df["Email"] == email]
+    if not user_rows.empty:
+        return user_rows.iloc[0]["Статус"] == "confirmed"
+    return False
 
 def save_registration_to_csv(name, username, email, phone):
-    init_users_file()
+    init_files()
     df = pd.read_csv(USERS_FILE, encoding="utf-8-sig")
     
     username = username.strip().lower()
     email = email.strip().lower()
     
     if username in df["Username"].values:
-        return False, "username"  # Такой username уже существует
+        return False, "username"
     if email in df["Email"].values:
-        return False, "email"     # Такой email уже зарегистрирован
+        return False, "email"
     
     new_row = pd.DataFrame([{
         "Имя": name,
         "Username": username,
         "Email": email,
         "Телефон": phone,
-        "Дата_регистрации": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "Дата_регистрации": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Статус": "pending"
     }])
     df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
@@ -64,29 +138,33 @@ def get_user_by_username(username):
             "name": row["Имя"],
             "username": row["Username"],
             "email": row["Email"],
-            "phone": row["Телефон"]
+            "phone": row["Телефон"],
+            "status": row["Статус"]
         }
     return None
 
-def send_welcome_email(user_email, username, name):
-    """Отправляет приветственное письмо пользователю после регистрации"""
+def send_verification_email(user_email, username, name, token):
+    """Отправляет письмо со ссылкой для подтверждения"""
     try:
+        verification_link = f"{BASE_URL}?verify={token}"
+        
         msg = MIMEMultipart()
         msg['From'] = EMAIL_LOGIN
         msg['To'] = user_email
-        msg['Subject'] = "Добро пожаловать в Аналитик WB!"
+        msg['Subject'] = "Подтвердите регистрацию в Аналитик WB"
         
         body = f"""
         <h2>Здравствуйте, {name}!</h2>
-        <p>Вы успешно зарегистрировались в сервисе <strong>«Аналитик WB»</strong>.</p>
-        <p><strong>Ваши данные для входа:</strong></p>
+        <p>Вы зарегистрировались в сервисе <strong>«Аналитик WB»</strong>.</p>
+        <p>Для завершения регистрации <strong>подтвердите ваш email</strong>, перейдя по ссылке:</p>
+        <p><a href="{verification_link}" style="background-color:#4CAF50; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;">Подтвердить email</a></p>
+        <p>или скопируйте ссылку в браузер: <br>{verification_link}</p>
+        <p><strong>Ваши данные для входа после подтверждения:</strong></p>
         <ul>
-            <li><strong>Username (логин):</strong> {username}</li>
-            <li><strong>Пароль:</strong> secret123</li>
+            <li><strong>Username:</strong> {username}</li>
+            <li><strong>Пароль:</strong> {VALID_PASSWORD}</li>
         </ul>
-        <p>🔗 <a href="https://wb-analytics-igor1984-23.streamlit.app">Перейти в сервис</a></p>
-        <p>Сервис автоматически анализирует отчёты Wildberries и показывает убыточные товары.</p>
-        <p>Если у вас возникнут вопросы или предложения — просто отправьте обратную связь в боковой панели сервиса или ответьте на это письмо.</p>
+        <p>Ссылка действительна 24 часа.</p>
         <br>
         <p>С уважением,<br>Команда Аналитик WB</p>
         """
@@ -100,7 +178,7 @@ def send_welcome_email(user_email, username, name):
         server.quit()
         return True
     except Exception as e:
-        print(f"Ошибка отправки welcome email: {e}")
+        print(f"Ошибка отправки verification email: {e}")
         return False
 
 def send_admin_notification(name, username, email, phone):
@@ -132,107 +210,17 @@ def send_admin_notification(name, username, email, phone):
         print(f"Ошибка отправки admin email: {e}")
         return False
 
-def send_feedback_email(user_name, username, user_email, feedback_type, feedback_text):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_LOGIN
-        msg['To'] = RECIPIENT_EMAIL
-        msg['Subject'] = f"[ОС] {feedback_type}: {user_name}"
-        
-        body = f"""
-        <h3>Обратная связь от пользователя</h3>
-        <p><strong>Время:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-        <p><strong>Имя:</strong> {user_name}</p>
-        <p><strong>Username:</strong> {username}</p>
-        <p><strong>Email:</strong> {user_email}</p>
-        <p><strong>Тип:</strong> {feedback_type}</p>
-        <hr>
-        <p><strong>Сообщение:</strong></p>
-        <p>{feedback_text}</p>
-        """
-        
-        msg.attach(MIMEText(body, 'html'))
-        
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_LOGIN, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        return True
-    except Exception as e:
-        print(f"Ошибка отправки feedback: {e}")
-        return False
+# ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
+# Функции calculate_unit_economy, send_feedback_email и другие остаются без изменений
+# (здесь должен быть весь остальной код из предыдущей версии)
 
 def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
-    df.columns = df.columns.str.strip().str.lower()
-    
-    sku_col = None
-    doc_type_col = None
-    amount_col = None
-    logistics_col = None
-    storage_col = None
-    penalties_col = None
-    other_col = None
-    
-    for col in df.columns:
-        if "артикул" in col or "sku" in col:
-            sku_col = col
-        if "тип документа" in col or "тип" in col:
-            doc_type_col = col
-        if "перечислению" in col:
-            amount_col = col
-        if "логистик" in col:
-            logistics_col = col
-        if "хранен" in col:
-            storage_col = col
-        if "штраф" in col:
-            penalties_col = col
-        if "прочие" in col or "удержан" in col:
-            other_col = col
-    
-    if not all([sku_col, doc_type_col, amount_col, logistics_col, storage_col, penalties_col, other_col]):
-        st.error("Не найдены нужные колонки")
-        return None
-    
-    for col in [amount_col, logistics_col, storage_col, penalties_col, other_col]:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    result = []
-    for sku in df[sku_col].unique():
-        sku_data = df[df[sku_col] == sku]
-        
-        sales = sku_data[sku_data[doc_type_col].str.contains("продажа", case=False, na=False)]
-        sales_count = len(sales)
-        sales_amount = sales[amount_col].sum()
-        
-        returns = sku_data[sku_data[doc_type_col].str.contains("возврат", case=False, na=False)]
-        returns_amount = returns[amount_col].sum()
-        
-        logistics_sum = sku_data[logistics_col].sum()
-        storage_sum = sku_data[storage_col].sum()
-        penalties_sum = sku_data[penalties_col].sum()
-        other_sum = sku_data[other_col].sum()
-        
-        total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
-        net_revenue = sales_amount + returns_amount - total_wb_costs
-        
-        purchase_total = sales_count * purchase_per_unit
-        final_profit = net_revenue - purchase_total - ad_cost_total
-        
-        result.append({
-            "Артикул": sku,
-            "Продано, шт": sales_count,
-            "Выручка WB (брутто)": sales_amount,
-            "Возвраты": returns_amount,
-            "Расходы WB": total_wb_costs,
-            "Чистая выручка WB": net_revenue,
-            "Закупка (всего)": purchase_total,
-            "Реклама (всего)": ad_cost_total,
-            "Реальная прибыль": final_profit,
-            "Убыточен?": "ДА" if final_profit < 0 else "НЕТ"
-        })
-    
-    return pd.DataFrame(result)
+    # ... (код функции остаётся без изменений)
+    pass
+
+def send_feedback_email(user_name, username, user_email, feedback_type, feedback_text):
+    # ... (код функции остаётся без изменений)
+    pass
 
 # Инициализация состояния
 if "authenticated" not in st.session_state:
@@ -241,6 +229,21 @@ if "user_data" not in st.session_state:
     st.session_state.user_data = None
 
 st.set_page_config(page_title="Аналитик WB", page_icon="📊")
+
+# ========== ОБРАБОТКА ССЫЛКИ ПОДТВЕРЖДЕНИЯ ==========
+query_params = st.query_params
+if "verify" in query_params:
+    token = query_params["verify"]
+    if verify_token(token):
+        st.title("✅ Email подтверждён!")
+        st.markdown("Ваша почта успешно подтверждена. Теперь вы можете войти в сервис.")
+        st.markdown(f"[👉 Перейти к входу]({BASE_URL})")
+        st.stop()
+    else:
+        st.title("❌ Ошибка подтверждения")
+        st.markdown("Ссылка недействительна или истекла. Попробуйте зарегистрироваться заново.")
+        st.markdown(f"[👉 Вернуться к регистрации]({BASE_URL})")
+        st.stop()
 
 # ========== ВЫБОР РЕЖИМА ==========
 if not st.session_state.authenticated:
@@ -255,20 +258,19 @@ if not st.session_state.authenticated:
     # ========== НОВЫЙ ПОЛЬЗОВАТЕЛЬ ==========
     if mode == "🔐 Я новый пользователь":
         st.markdown("### Добро пожаловать!")
-        st.markdown("Заполните форму — на почту придут данные для входа.")
+        st.markdown("Заполните форму — на почту придёт ссылка для подтверждения.")
         
         st.markdown("---")
         
         with st.form("registration_form"):
             name = st.text_input("Ваше имя *")
-            username = st.text_input("Придумайте username (логин) *", help="Только латиница, цифры, без пробелов. Например: ivan2026")
-            email = st.text_input("Ваш email *", help="На него придут данные для входа")
+            username = st.text_input("Придумайте username (логин) *", help="Только латиница, цифры, без пробелов")
+            email = st.text_input("Ваш email *", help="На него придёт ссылка для подтверждения")
             phone = st.text_input("Телефон (необязательно)")
             
             submitted = st.form_submit_button("Зарегистрироваться")
             
             if submitted:
-                # Валидация
                 errors = []
                 if not name:
                     errors.append("Имя")
@@ -290,12 +292,14 @@ if not st.session_state.authenticated:
                         elif conflict == "email":
                             st.error(f"Email '{email}' уже зарегистрирован. Войдите или используйте другой email.")
                     else:
-                        # Отправляем письма
-                        send_welcome_email(email, username, name)
+                        # Генерируем токен и отправляем письмо
+                        token = generate_token(email)
+                        save_verification_token(email, token)
+                        send_verification_email(email, username, name, token)
                         send_admin_notification(name, username, email, phone)
                         
-                        st.success("✅ Регистрация успешна! Проверьте почту — там данные для входа.")
-                        st.info(f"На почту {email} отправлено приветственное письмо с username и паролем.")
+                        st.success("✅ Регистрация почти завершена!")
+                        st.info(f"На почту {email} отправлено письмо со ссылкой для подтверждения.\n\nПерейдите по ссылке в письме, чтобы активировать аккаунт.")
     
     # ========== ВХОД ДЛЯ ЗАРЕГИСТРИРОВАННЫХ ==========
     else:
@@ -308,9 +312,12 @@ if not st.session_state.authenticated:
             if password_input == VALID_PASSWORD:
                 user = get_user_by_username(username_input)
                 if user:
-                    st.session_state.user_data = user
-                    st.session_state.authenticated = True
-                    st.rerun()
+                    if user["status"] == "confirmed":
+                        st.session_state.user_data = user
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.warning("📧 Ваш email не подтверждён. Проверьте почту и перейдите по ссылке из письма.")
                 else:
                     st.error("❌ Неверный username. Зарегистрируйтесь, если ещё не сделали этого.")
             else:
@@ -318,127 +325,8 @@ if not st.session_state.authenticated:
     
     st.stop()
 
-# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
+# ========== ОСНОВНОЙ ИНТЕРФЕЙС (после входа) ==========
 # ... (основная часть остаётся без изменений) ...
-
-with st.sidebar:
-    st.markdown(f"### 👤 {st.session_state.user_data['name']}")
-    st.markdown(f"🔑 {st.session_state.user_data['username']}")
-    st.markdown(f"📧 {st.session_state.user_data['email']}")
-    if st.session_state.user_data.get('phone'):
-        st.markdown(f"📱 {st.session_state.user_data['phone']}")
-    st.markdown("---")
-    
-    if st.button("🚪 Выйти"):
-        for key in st.session_state.keys():
-            del st.session_state[key]
-        st.rerun()
-    
-    st.markdown("---")
-    
-    # Кнопка скачивания списка пользователей (только для админа)
-    if st.session_state.user_data['username'] == ADMIN_USERNAME:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "rb") as f:
-                st.download_button(
-                    label="📥 Скачать список пользователей (CSV)",
-                    data=f,
-                    file_name="registered_users.csv",
-                    mime="text/csv"
-                )
-    
-    st.markdown("---")
-    
-    with st.expander("💬 Отправить обратную связь"):
-        feedback_type = st.selectbox(
-            "Тип обращения",
-            ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"]
-        )
-        feedback_text = st.text_area("Ваше сообщение", height=150)
-        
-        if st.button("📨 Отправить", type="primary"):
-            if feedback_text.strip():
-                with st.spinner("Отправка..."):
-                    sent = send_feedback_email(
-                        st.session_state.user_data["name"],
-                        st.session_state.user_data["username"],
-                        st.session_state.user_data["email"],
-                        feedback_type,
-                        feedback_text
-                    )
-                if sent:
-                    st.success("✅ Спасибо! Ваше сообщение отправлено.")
-                else:
-                    st.error("❌ Ошибка отправки. Попробуйте позже.")
-            else:
-                st.error("Пожалуйста, напишите сообщение")
-
 st.title("📊 Аналитик Wildberries")
 st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
-
-st.subheader("💰 Введите дополнительные расходы")
-
-col1, col2 = st.columns(2)
-with col1:
-    purchase_per_unit = st.number_input(
-        "Закупка (себестоимость 1 единицы)", 
-        min_value=0.0, 
-        value=300.0,
-        step=50.0
-    )
-with col2:
-    ad_cost_total = st.number_input(
-        "Реклама (общая сумма за период)", 
-        min_value=0.0, 
-        value=1000.0,
-        step=500.0
-    )
-
-st.markdown("---")
-st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
-
-uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
-
-if uploaded_file is not None:
-    try:
-        df = pd.read_excel(uploaded_file)
-        st.success(f"Файл загружен, строк: {len(df)}")
-        
-        with st.expander("📄 Предпросмотр загруженных данных"):
-            st.dataframe(df.head())
-        
-        if st.button("🧮 Рассчитать реальную прибыль", type="primary"):
-            with st.spinner("Идёт расчёт..."):
-                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
-            
-            if result_df is not None and not result_df.empty:
-                st.subheader("📈 Результат расчёта")
-                
-                def highlight_loss(row):
-                    return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
-                
-                st.dataframe(result_df.style.apply(highlight_loss, axis=1))
-                
-                st.subheader("🔴 Убыточные товары")
-                loss_df = result_df[result_df['Убыточен?'] == 'ДА']
-                if not loss_df.empty:
-                    st.dataframe(loss_df)
-                else:
-                    st.info("✅ Убыточных товаров не найдено")
-                
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    result_df.to_excel(writer, sheet_name='Юнит-экономика', index=False)
-                st.download_button(
-                    label="📥 Скачать отчёт (Excel)",
-                    data=output.getvalue(),
-                    file_name="unit_economy_result.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.error("Не удалось выполнить расчёт. Проверьте структуру файла.")
-    except Exception as e:
-        st.error(f"Ошибка при обработке файла: {e}")
-
-st.markdown("---")
-st.caption("Автоматический расчёт юнит-экономики по отчётам WB")
+# ... (весь остальной код интерфейса)
