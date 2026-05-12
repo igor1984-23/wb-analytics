@@ -87,6 +87,7 @@ def send_welcome_email(user_email, username, name):
             <li><strong>Username:</strong> {username}</li>
             <li><strong>Пароль:</strong> {VALID_PASSWORD}</li>
         </ul>
+        <p><a href="{BASE_URL}">Перейти в сервис</a></p>
         """
         msg.attach(MIMEText(body, 'html'))
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
@@ -96,7 +97,7 @@ def send_welcome_email(user_email, username, name):
         server.quit()
         return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки welcome: {e}")
         return False
 
 def send_admin_notification(name, username, email, phone):
@@ -114,7 +115,7 @@ def send_admin_notification(name, username, email, phone):
         server.quit()
         return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки admin: {e}")
         return False
 
 def send_feedback_email(user_name, username, user_email, feedback_type, feedback_text):
@@ -132,7 +133,7 @@ def send_feedback_email(user_name, username, user_email, feedback_type, feedback
         server.quit()
         return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки feedback: {e}")
         return False
 
 def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
@@ -260,84 +261,150 @@ if "user_data" not in st.session_state:
 
 st.set_page_config(page_title="Аналитик WB", page_icon="📊")
 
+# ========== АВТОРИЗАЦИЯ ==========
 if not st.session_state.authenticated:
     st.title("📊 Аналитик Wildberries")
+    
     mode = st.radio("", ["🔐 Я новый пользователь", "👋 Я уже зарегистрирован"], horizontal=True)
     
     if mode == "🔐 Я новый пользователь":
-        with st.form("reg"):
-            name = st.text_input("Имя")
-            username = st.text_input("Username (логин)")
-            email = st.text_input("Email")
+        with st.form("register_form"):
+            name = st.text_input("Имя *")
+            username = st.text_input("Username (логин) *", help="Только латиница, цифры и _")
+            email = st.text_input("Email *")
             phone = st.text_input("Телефон (необязательно)")
-            if st.form_submit_button("Зарегистрироваться"):
-                if name and username and email:
+            submitted = st.form_submit_button("Зарегистрироваться", use_container_width=True)
+            
+            if submitted:
+                if not name or not username or not email:
+                    st.error("Заполните все обязательные поля")
+                elif not re.match(r"^[a-zA-Z0-9_]+$", username):
+                    st.error("Username: только латиница, цифры и _")
+                elif not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
+                    st.error("Некорректный email")
+                else:
                     ok, err = save_registration_to_csv(name, username, email, phone)
                     if ok:
                         send_welcome_email(email, username, name)
                         send_admin_notification(name, username, email, phone)
-                        st.session_state.user_data = {"name": name, "username": username, "email": email, "phone": phone}
+                        st.session_state.user_data = {
+                            "name": name,
+                            "username": username,
+                            "email": email,
+                            "phone": phone
+                        }
                         st.session_state.authenticated = True
                         st.rerun()
                     else:
                         st.error(f"Ошибка: {err} уже используется")
+    
+    else:  # режим входа
+        with st.form("login_form"):
+            username = st.text_input("Username (логин)")
+            password = st.text_input("Пароль", type="password")
+            submitted = st.form_submit_button("Войти", use_container_width=True)
+            
+            if submitted:
+                if password == VALID_PASSWORD:
+                    user = get_user_by_username(username)
+                    if user:
+                        st.session_state.user_data = user
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.error("❌ Неверный username")
                 else:
-                    st.error("Заполните имя, username и email")
-    else:
-        username = st.text_input("Username")
-        password = st.text_input("Пароль", type="password")
-        if st.button("Войти"):
-            if password == VALID_PASSWORD:
-                user = get_user_by_username(username)
-                if user:
-                    st.session_state.user_data = user
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Неверный username")
-            else:
-                st.error("Неверный пароль")
+                    st.error("❌ Неверный пароль")
+    
     st.stop()
 
-# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
+# ========== ОСНОВНОЙ ИНТЕРФЕЙС (после входа) ==========
 with st.sidebar:
-    st.markdown(f"### {st.session_state.user_data['name']}")
-    st.markdown(f"@{st.session_state.user_data['username']}")
-    st.markdown(f"{st.session_state.user_data['email']}")
-    if st.button("Выйти"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
+    st.markdown(f"### 👤 {st.session_state.user_data['name']}")
+    st.markdown(f"🔑 {st.session_state.user_data['username']}")
+    st.markdown(f"📧 {st.session_state.user_data['email']}")
+    if st.session_state.user_data.get('phone'):
+        st.markdown(f"📱 {st.session_state.user_data['phone']}")
+    st.markdown("---")
+    
+    if st.button("🚪 Выйти", use_container_width=True):
+        for key in st.session_state.keys():
+            del st.session_state[key]
         st.rerun()
-    with st.expander("Обратная связь"):
-        t = st.selectbox("Тип", ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"])
-        txt = st.text_area("Сообщение", height=150)
-        if st.button("📨 Отправить") and txt:
-            send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], t, txt)
-            st.success("Отправлено!")
+    
+    st.markdown("---")
+    
+    # Кнопка скачивания списка пользователей (только для админа)
+    if st.session_state.user_data['username'] == ADMIN_USERNAME and os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "rb") as f:
+            st.download_button(
+                label="📥 Скачать список пользователей",
+                data=f,
+                file_name="users_data.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    
+    st.markdown("---")
+    
+    with st.expander("💬 Обратная связь"):
+        feedback_type = st.selectbox("Тип", ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"])
+        feedback_text = st.text_area("Сообщение", height=100)
+        if st.button("📨 Отправить", use_container_width=True) and feedback_text.strip():
+            send_feedback_email(
+                st.session_state.user_data['name'],
+                st.session_state.user_data['username'],
+                st.session_state.user_data['email'],
+                feedback_type,
+                feedback_text
+            )
+            st.success("✅ Отправлено!")
 
+# ========== ОСНОВНОЙ КОНТЕНТ ==========
 st.title("📊 Аналитик Wildberries")
 st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
 
+st.subheader("💰 Введите дополнительные расходы")
+
 col1, col2 = st.columns(2)
 with col1:
-    purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", value=300.0, step=50.0)
+    purchase_per_unit = st.number_input(
+        "Закупка (себестоимость 1 единицы)",
+        min_value=0.0,
+        value=300.0,
+        step=50.0,
+        help="Сколько вы платите за одну штуку товара поставщику"
+    )
 with col2:
-    ad_cost_total = st.number_input("Реклама (общая сумма)", value=1000.0, step=500.0)
+    ad_cost_total = st.number_input(
+        "Реклама (общая сумма за период)",
+        min_value=0.0,
+        value=1000.0,
+        step=500.0,
+        help="Сколько вы потратили на рекламу за эту неделю"
+    )
 
-uploaded_file = st.file_uploader("Загрузите отчёт WB (Excel)", type=["xlsx", "xls"])
+st.markdown("---")
+st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
+
+uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
         df = pd.read_excel(uploaded_file)
-        st.success(f"Файл загружен, строк: {len(df)}")
+        st.success(f"✅ Файл загружен, строк: {len(df)}")
         
-        if st.button("🧮 Рассчитать реальную прибыль", type="primary"):
+        with st.expander("📄 Предпросмотр загруженных данных"):
+            st.dataframe(df.head())
+        
+        if st.button("🧮 Рассчитать реальную прибыль", type="primary", use_container_width=True):
             with st.spinner("Идёт расчёт..."):
                 result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
             
             if result_df is not None and not result_df.empty:
                 st.subheader("📈 Результат расчёта")
                 
+                # Отображаем каждый товар с рекомендацией
                 for idx, row in result_df.iterrows():
                     if row["Убыточен?"] == "ДА":
                         st.markdown(f"🔴 **{row['Артикул']}**")
@@ -348,7 +415,7 @@ if uploaded_file is not None:
                     st.markdown("---")
                 
                 # Полная таблица под раскрывающимся блоком
-                with st.expander("📋 Показать полную таблицу"):
+                with st.expander("📋 Показать полную таблицу со всеми данными"):
                     def highlight_loss(row):
                         return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
                     st.dataframe(result_df.style.apply(highlight_loss, axis=1))
@@ -361,9 +428,13 @@ if uploaded_file is not None:
                     label="📥 Скачать отчёт (Excel)",
                     data=output.getvalue(),
                     file_name="unit_economy_result.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
+            else:
+                st.error("Не удалось выполнить расчёт. Проверьте структуру файла.")
     except Exception as e:
-        st.error(f"Ошибка: {e}")
+        st.error(f"Ошибка при обработке файла: {e}")
 
-st.caption("Автоматический расчёт юнит-экономики по отчётам WB")
+st.markdown("---")
+st.caption("Аналитик WB — автоматический расчёт юнит-экономики по отчётам Wildberries")
