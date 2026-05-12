@@ -12,7 +12,6 @@ import re
 VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "gritzner"
 
-# ВАША ССЫЛКА
 BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
@@ -135,7 +134,7 @@ def send_feedback_email(user_name, username, user_email, feedback_type, feedback
         print(f"Ошибка: {e}")
         return False
 
-def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type):
+def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type, sku_ad_manual):
     df.columns = df.columns.str.strip().str.lower()
     sku_col = None
     doc_type_col = None
@@ -178,14 +177,25 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, 
     
     total_revenue = sum(sku_revenue.values())
     
-    # Распределяем рекламу пропорционально выручке
+    # Определяем рекламу по каждому товару (ручной ввод или автоматический)
     sku_ad_cost = {}
-    if total_revenue > 0 and ad_cost_total > 0:
-        for sku, revenue in sku_revenue.items():
-            sku_ad_cost[sku] = ad_cost_total * (revenue / total_revenue)
-    else:
+    total_manual_ad = sum(sku_ad_manual.get(sku, 0) for sku in sku_revenue.keys())
+    
+    if total_manual_ad > 0:
+        # Используем ручной ввод
         for sku in sku_revenue.keys():
-            sku_ad_cost[sku] = 0
+            sku_ad_cost[sku] = sku_ad_manual.get(sku, 0)
+        # Корректируем общую сумму рекламы для сводки
+        actual_ad_total = total_manual_ad
+    else:
+        # Автоматическое распределение
+        actual_ad_total = ad_cost_total
+        if total_revenue > 0 and actual_ad_total > 0:
+            for sku, revenue in sku_revenue.items():
+                sku_ad_cost[sku] = actual_ad_total * (revenue / total_revenue)
+        else:
+            for sku in sku_revenue.keys():
+                sku_ad_cost[sku] = 0
     
     result = []
     total_sales_count = 0
@@ -433,7 +443,7 @@ col1, col2 = st.columns(2)
 with col1:
     purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", min_value=0.0, value=300.0, step=50.0)
 with col2:
-    ad_cost_total = st.number_input("Реклама (общая сумма)", min_value=0.0, value=1000.0, step=500.0)
+    ad_cost_total = st.number_input("Реклама (общая сумма для автораспределения)", min_value=0.0, value=1000.0, step=500.0, help="Если не заполните ручной ввод ниже, реклама распределится пропорционально выручке")
 
 st.subheader("💳 Налоги и комиссии")
 
@@ -447,7 +457,7 @@ with col5:
     st.metric("Ставка налога", f"{tax_rate:.0f}%")
 
 st.markdown("---")
-st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
+st.write("Загрузите отчёт WB в формате Excel")
 
 uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
 
@@ -456,12 +466,32 @@ if uploaded_file is not None:
         df = pd.read_excel(uploaded_file)
         st.success(f"✅ Файл загружен, строк: {len(df)}")
         
-        with st.expander("📄 Предпросмотр загруженных данных"):
-            st.dataframe(df.head())
+        # Определяем уникальные артикулы
+        temp_df = df.copy()
+        temp_df.columns = temp_df.columns.str.strip().str.lower()
+        sku_col = None
+        for col in temp_df.columns:
+            if "артикул" in col or "sku" in col:
+                sku_col = col
+                break
+        
+        unique_skus = temp_df[sku_col].unique().tolist() if sku_col else []
+        
+        st.subheader("🎯 Реклама по каждому товару (опционально)")
+        st.info("Если заполните поля ниже — они имеют приоритет над общей суммой. Оставьте пустыми, чтобы использовать автораспределение.")
+        
+        sku_ad_manual = {}
+        cols_per_row = 2
+        for i, sku in enumerate(unique_skus):
+            col = st.columns(cols_per_row)[i % cols_per_row]
+            with col:
+                ad_val = st.number_input(f"{sku}", min_value=0.0, value=0.0, step=100.0, key=f"ad_{sku}")
+                if ad_val > 0:
+                    sku_ad_manual[sku] = ad_val
         
         if st.button("🧮 Рассчитать реальную прибыль", type="primary", use_container_width=True):
             with st.spinner("Идёт расчёт..."):
-                result_df, summary = calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type)
+                result_df, summary = calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type, sku_ad_manual)
             
             if result_df is not None and not result_df.empty:
                 # Итоговая сводка
@@ -472,7 +502,8 @@ if uploaded_file is not None:
                     st.metric("📦 Продано, шт", f"{summary['total_sales']:,}".replace(",", " "))
                     st.metric("💰 Выручка брутто", f"{summary['total_revenue']:,.0f} ₽".replace(",", " "))
                 with col_b:
-                    st.metric("📦 Расходы всего", f"{(summary['total_purchase'] + summary['total_ad'] + summary['total_acquirer'] + summary['total_logistics'] + summary['total_returns'] + summary['total_storage'] + summary['total_penalties']):,.0f} ₽".replace(",", " "))
+                    total_expenses_fmt = summary['total_purchase'] + summary['total_ad'] + summary['total_acquirer'] + summary['total_logistics'] + summary['total_returns'] + summary['total_storage'] + summary['total_penalties']
+                    st.metric("📦 Расходы всего", f"{total_expenses_fmt:,.0f} ₽".replace(",", " "))
                     st.metric("💰 Закупка", f"{summary['total_purchase']:,.0f} ₽".replace(",", " "))
                     st.metric("📢 Реклама", f"{summary['total_ad']:,.0f} ₽".replace(",", " "))
                 with col_c:
@@ -493,6 +524,7 @@ if uploaded_file is not None:
                 st.subheader("📈 Результат по каждому товару")
                 
                 for idx, row in result_df.iterrows():
+                    ad_display = f", реклама {row['Реклама']:.0f} ₽" if row['Реклама'] > 0 else ""
                     if row["Убыточен?"] == "ДА":
                         st.markdown(f"🔴 **{row['Артикул']}**")
                         st.info(row["Комментарий"])
