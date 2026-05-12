@@ -224,25 +224,51 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         purchase_total = sales_count * purchase_per_unit
         final_profit = net_revenue - purchase_total - ad_cost_total
         
-        # Генерация подсказки
+        # Расчёт процентов для анализа
+        drr_percent = (ad_cost_total / sales_amount * 100) if sales_amount > 0 else 0
+        return_rate = (returns_count / sales_count * 100) if sales_count > 0 else 0
+        margin_percent = (final_profit / sales_amount * 100) if sales_amount > 0 else 0
+        
+        # Генерация умной подсказки
         if final_profit >= 0:
-            hint = f"✅ Товар прибыльный. Реальная прибыль: {final_profit} ₽. Выручка WB ({net_revenue} ₽) покрывает все расходы."
+            # Прибыльный товар
+            if margin_percent < 15:
+                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Маржа низкая. Рекомендуем поднять цену на 10% или проверить закупку."
+            else:
+                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Можно увеличить закупку или протестировать повышение цены."
         else:
+            # Убыточный товар — определяем главную причину
             reasons = []
+            recommendations = []
+            
+            if ad_cost_total > 0 and drr_percent > 30:
+                reasons.append(f"реклама {ad_cost_total:.0f} ₽ ({drr_percent:.1f}% от выручки)")
+                recommendations.append("🔴 Отключите рекламу по этому SKU на неделю")
+            
+            if returns_count > 0 and return_rate > 20:
+                reasons.append(f"возвраты: {returns_count} шт. ({return_rate:.1f}% от продаж)")
+                recommendations.append("🔴 Проверьте качество товара, фото и описание")
+            
             if logistics_sum > 0:
-                reasons.append(f"логистика {logistics_sum} ₽")
-            if returns_count > 0:
-                reasons.append(f"{returns_count} возвратов на сумму {abs(returns_amount)} ₽")
-            if penalties_sum > 0:
-                reasons.append(f"штрафы {penalties_sum} ₽")
+                reasons.append(f"логистика {logistics_sum:.0f} ₽")
+                recommendations.append("🔴 Рассмотрите FBS (доставка со своего склада) или увеличьте цену")
+            
+            if purchase_total > 0 and margin_percent < -10:
+                reasons.append(f"закупка {purchase_total:.0f} ₽")
+                recommendations.append("🔴 Ищите поставщика дешевле или повышайте цену")
+            
             if storage_sum > 0:
-                reasons.append(f"хранение {storage_sum} ₽")
-            if purchase_total > 0:
-                reasons.append(f"закупка {purchase_total} ₽")
-            if ad_cost_total > 0:
-                reasons.append(f"реклама {ad_cost_total} ₽")
-            reason_text = ", ".join(reasons) if reasons else "различные расходы"
-            hint = f"❌ Убыток: {final_profit} ₽. Основные причины: {reason_text}."
+                reasons.append(f"хранение {storage_sum:.0f} ₽")
+                recommendations.append("🔴 Уменьшите остатки, заказывайте меньшую партию")
+            
+            if not reasons:
+                reasons.append("различные расходы")
+                recommendations.append("🔴 Рекомендуем временно отключить товар и пересчитать")
+            
+            reason_text = ", ".join(reasons)
+            recommendation_text = " | ".join(recommendations[:2])
+            
+            hint = f"❌ Убыток: {final_profit:.0f} ₽. Причины: {reason_text}. {recommendation_text}."
         
         result.append({
             "Артикул": sku,
@@ -293,8 +319,8 @@ if not st.session_state.authenticated:
         st.markdown("### Добро пожаловать!")
         with st.form("registration_form"):
             name = st.text_input("Ваше имя *")
-            username = st.text_input("Придумайте username (логин) *")
-            email = st.text_input("Ваш email *")
+            username = st.text_input("Придумайте username (логин) *", help="Только латиница, цифры, без пробелов")
+            email = st.text_input("Ваш email *", help="На него придёт ссылка для подтверждения")
             phone = st.text_input("Телефон (необязательно)")
             submitted = st.form_submit_button("Зарегистрироваться")
             if submitted:
@@ -331,9 +357,9 @@ if not st.session_state.authenticated:
                         st.session_state.authenticated = True
                         st.rerun()
                     else:
-                        st.warning("Email не подтверждён. Проверьте почту.")
+                        st.warning("📧 Email не подтверждён. Проверьте почту и перейдите по ссылке из письма.")
                 else:
-                    st.error("Неверный username")
+                    st.error("❌ Неверный username. Зарегистрируйтесь, если ещё не сделали этого.")
             else:
                 st.error("Неверный пароль")
     st.stop()
@@ -360,42 +386,64 @@ with st.sidebar:
         feedback_text = st.text_area("Сообщение", height=150)
         if st.button("📨 Отправить") and feedback_text.strip():
             send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], feedback_type, feedback_text)
-            st.success("✅ Отправлено!")
+            st.success("✅ Спасибо! Ваше сообщение отправлено.")
 
 # ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
 st.title("📊 Аналитик Wildberries")
 st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
 
-st.subheader("💰 Введите расходы")
+st.subheader("💰 Введите дополнительные расходы")
 col1, col2 = st.columns(2)
 with col1:
-    purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", min_value=0.0, value=300.0, step=50.0)
+    purchase_per_unit = st.number_input(
+        "Закупка (себестоимость 1 единицы)", 
+        min_value=0.0, 
+        value=300.0,
+        step=50.0,
+        help="Сколько вы платите за одну штуку товара поставщику"
+    )
 with col2:
-    ad_cost_total = st.number_input("Реклама (общая сумма)", min_value=0.0, value=1000.0, step=500.0)
+    ad_cost_total = st.number_input(
+        "Реклама (общая сумма за период)", 
+        min_value=0.0, 
+        value=1000.0,
+        step=500.0,
+        help="Сколько вы потратили на рекламу за эту неделю"
+    )
 
-uploaded_file = st.file_uploader("Загрузите отчёт WB (Excel)", type=["xlsx", "xls"])
+st.markdown("---")
+st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
+
+uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
+
 if uploaded_file is not None:
     try:
         df = pd.read_excel(uploaded_file)
         st.success(f"Файл загружен, строк: {len(df)}")
-        if st.button("🧮 Рассчитать"):
-            result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
-            if result_df is not None:
+        
+        with st.expander("📄 Предпросмотр загруженных данных"):
+            st.dataframe(df.head())
+        
+        if st.button("🧮 Рассчитать реальную прибыль", type="primary"):
+            with st.spinner("Идёт расчёт..."):
+                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
+            
+            if result_df is not None and not result_df.empty:
                 st.subheader("📈 Результат расчёта")
                 
-                # Отображаем таблицу с подсказками
+                # Отображаем каждый товар с подсказкой
                 for idx, row in result_df.iterrows():
                     if row["Убыточен?"] == "ДА":
-                        st.markdown(f"🔴 **{row['Артикул']}** — убыток: {row['Реальная прибыль']} ₽")
-                        with st.expander("ℹ️ Почему убыток?"):
+                        st.markdown(f"🔴 **{row['Артикул']}** — убыток: {row['Реальная прибыль']:.0f} ₽")
+                        with st.expander("ℹ️ Почему убыток и что делать?"):
                             st.info(row["Комментарий"])
                     else:
-                        st.markdown(f"🟢 **{row['Артикул']}** — прибыль: {row['Реальная прибыль']} ₽")
-                        with st.expander("ℹ️ Детали"):
+                        st.markdown(f"🟢 **{row['Артикул']}** — прибыль: {row['Реальная прибыль']:.0f} ₽")
+                        with st.expander("ℹ️ Детали и рекомендация"):
                             st.success(row["Комментарий"])
                 
-                # Показываем также таблицу для тех, кто хочет видеть все данные
-                with st.expander("📋 Показать полную таблицу"):
+                # Полная таблица (под раскрывающимся блоком)
+                with st.expander("📋 Показать полную таблицу со всеми данными"):
                     def highlight_loss(row):
                         return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
                     st.dataframe(result_df.style.apply(highlight_loss, axis=1))
@@ -403,9 +451,17 @@ if uploaded_file is not None:
                 # Кнопка скачать
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    result_df.to_excel(writer, sheet_name='Анализ', index=False)
-                st.download_button("📥 Скачать отчёт (Excel)", data=output.getvalue(), file_name="unit_economy.xlsx")
+                    result_df.to_excel(writer, sheet_name='Юнит-экономика', index=False)
+                st.download_button(
+                    label="📥 Скачать отчёт (Excel)",
+                    data=output.getvalue(),
+                    file_name="unit_economy_result.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.error("Не удалось выполнить расчёт. Проверьте структуру файла.")
     except Exception as e:
-        st.error(f"Ошибка: {e}")
+        st.error(f"Ошибка при обработке файла: {e}")
 
-st.caption("Аналитик WB — автоматический расчёт юнит-экономики")
+st.markdown("---")
+st.caption("Автоматический расчёт юнит-экономики по отчётам WB")
