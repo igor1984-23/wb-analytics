@@ -10,7 +10,7 @@ import re
 
 # ========== НАСТРОЙКИ ==========
 VALID_PASSWORD = "secret123"
-ADMIN_USERNAME = "admin"
+ADMIN_USERNAME = "gritzner"
 
 # ВАША РЕАЛЬНАЯ ССЫЛКА
 BASE_URL = "https://wb-analytics-mqxvuxfayhh5h5s3nqbq3ti.streamlit.app"
