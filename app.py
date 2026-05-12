@@ -12,7 +12,7 @@ import re
 VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "gritzner"
 
-# ВАША ССЫЛКА (только одна строка, без лишних кавычек)
+# ВАША ССЫЛКА
 BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
@@ -80,7 +80,7 @@ def send_welcome_email(user_email, username, name):
         msg['Subject'] = "Добро пожаловать в Аналитик WB"
         body = f"""
         <h2>Здравствуйте, {name}!</h2>
-        <p>Вы успешно зарегистрировались в сервисе.</p>
+        <p>Вы успешно зарегистрировались.</p>
         <p><strong>Ваши данные для входа:</strong></p>
         <ul>
             <li><strong>Username:</strong> {username}</li>
@@ -135,7 +135,7 @@ def send_feedback_email(user_name, username, user_email, feedback_type, feedback
         print(f"Ошибка: {e}")
         return False
 
-def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
+def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type):
     df.columns = df.columns.str.strip().str.lower()
     sku_col = None
     doc_type_col = None
@@ -163,12 +163,42 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
     
     if not all([sku_col, doc_type_col, amount_col, logistics_col, storage_col, penalties_col, other_col]):
         st.error("Не найдены нужные колонки")
-        return None
+        return None, None
     
     for col in [amount_col, logistics_col, storage_col, penalties_col, other_col]:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     
+    # Собираем выручку по товарам для распределения рекламы
+    sku_revenue = {}
+    for sku in df[sku_col].unique():
+        sku_data = df[df[sku_col] == sku]
+        sales = sku_data[sku_data[doc_type_col].str.contains("продажа", case=False, na=False)]
+        sales_amount = sales[amount_col].sum()
+        sku_revenue[sku] = sales_amount
+    
+    total_revenue = sum(sku_revenue.values())
+    
+    # Распределяем рекламу пропорционально выручке
+    sku_ad_cost = {}
+    if total_revenue > 0 and ad_cost_total > 0:
+        for sku, revenue in sku_revenue.items():
+            sku_ad_cost[sku] = ad_cost_total * (revenue / total_revenue)
+    else:
+        for sku in sku_revenue.keys():
+            sku_ad_cost[sku] = 0
+    
     result = []
+    total_sales_count = 0
+    total_sales_amount = 0
+    total_net_revenue = 0
+    total_purchase = 0
+    total_ad_cost = 0
+    total_acquirer = 0
+    total_logistics = 0
+    total_returns_amount = 0
+    total_storage = 0
+    total_penalties = 0
+    
     for sku in df[sku_col].unique():
         sku_data = df[df[sku_col] == sku]
         
@@ -188,9 +218,24 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
         net_revenue = sales_amount + returns_amount - total_wb_costs
         purchase_total = sales_count * purchase_per_unit
-        final_profit = net_revenue - purchase_total - ad_cost_total
         
-        drr_percent = (ad_cost_total / sales_amount * 100) if sales_amount > 0 else 0
+        acquirer_cost = sales_amount * (acquirer_rate / 100)
+        ad_cost_for_sku = sku_ad_cost.get(sku, 0)
+        
+        final_profit = net_revenue - purchase_total - ad_cost_for_sku - acquirer_cost
+        
+        total_sales_count += sales_count
+        total_sales_amount += sales_amount
+        total_net_revenue += net_revenue
+        total_purchase += purchase_total
+        total_ad_cost += ad_cost_for_sku
+        total_acquirer += acquirer_cost
+        total_logistics += logistics_sum
+        total_returns_amount += returns_amount
+        total_storage += storage_sum
+        total_penalties += penalties_sum
+        
+        drr_percent = (ad_cost_for_sku / sales_amount * 100) if sales_amount > 0 else 0
         return_rate = (returns_count / sales_count * 100) if sales_count > 0 else 0
         margin_percent = (final_profit / sales_amount * 100) if sales_amount > 0 else 0
         
@@ -203,8 +248,8 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             reasons = []
             recommendations = []
             
-            if ad_cost_total > 0 and drr_percent > 30:
-                reasons.append(f"реклама {ad_cost_total:.0f} ₽ ({drr_percent:.1f}% от выручки)")
+            if ad_cost_for_sku > 0 and drr_percent > 30:
+                reasons.append(f"реклама {ad_cost_for_sku:.0f} ₽ ({drr_percent:.1f}% от выручки)")
                 recommendations.append("Отключите рекламу по этому SKU на неделю")
             
             if returns_count > 0 and return_rate > 20:
@@ -213,7 +258,7 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             
             if logistics_sum > 0:
                 reasons.append(f"логистика {logistics_sum:.0f} ₽")
-                recommendations.append("Рассмотрите FBS (доставка со своего склада) или увеличьте цену")
+                recommendations.append("Рассмотрите FBS или увеличьте цену")
             
             if purchase_total > 0 and margin_percent < -10:
                 reasons.append(f"закупка {purchase_total:.0f} ₽")
@@ -229,24 +274,53 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             
             reason_text = ", ".join(reasons)
             recommendation_text = " | ".join(recommendations[:2])
-            
             hint = f"❌ Убыток: {final_profit:.0f} ₽. Причины: {reason_text}. 🔧 {recommendation_text}."
         
         result.append({
             "Артикул": sku,
             "Продано, шт": sales_count,
-            "Выручка WB (брутто)": sales_amount,
+            "Выручка WB": sales_amount,
             "Возвраты": returns_amount,
             "Расходы WB": total_wb_costs,
             "Чистая выручка WB": net_revenue,
-            "Закупка (всего)": purchase_total,
-            "Реклама (всего)": ad_cost_total,
+            "Закупка": purchase_total,
+            "Реклама": ad_cost_for_sku,
+            "Эквайринг": acquirer_cost,
             "Реальная прибыль": final_profit,
             "Убыточен?": "ДА" if final_profit < 0 else "НЕТ",
             "Комментарий": hint
         })
     
-    return pd.DataFrame(result)
+    # Итоговая сводка
+    total_expenses = total_purchase + total_ad_cost + total_acquirer + total_logistics + abs(total_returns_amount) + total_storage + total_penalties
+    profit_before_tax = total_net_revenue - total_expenses
+    
+    if tax_type == "УСН 6% (доходы)":
+        tax = total_sales_amount * 0.06
+    else:
+        tax = profit_before_tax * (tax_rate / 100) if profit_before_tax > 0 else 0
+    
+    net_profit = profit_before_tax - tax
+    
+    summary = {
+        "total_sales": total_sales_count,
+        "total_revenue": total_sales_amount,
+        "total_net_revenue": total_net_revenue,
+        "total_purchase": total_purchase,
+        "total_ad": total_ad_cost,
+        "total_acquirer": total_acquirer,
+        "total_logistics": total_logistics,
+        "total_returns": abs(total_returns_amount),
+        "total_storage": total_storage,
+        "total_penalties": total_penalties,
+        "profit_before_tax": profit_before_tax,
+        "tax": tax,
+        "net_profit": net_profit,
+        "tax_type": tax_type,
+        "tax_rate": tax_rate
+    }
+    
+    return pd.DataFrame(result), summary
 
 # ========== ЗАПУСК ==========
 init_files()
@@ -314,6 +388,7 @@ if not st.session_state.authenticated:
     
     st.stop()
 
+# ========== БОКОВАЯ ПАНЕЛЬ ==========
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.user_data['name']}")
     st.markdown(f"🔑 {st.session_state.user_data['username']}")
@@ -348,8 +423,11 @@ with st.sidebar:
             )
             st.success("✅ Отправлено!")
 
+# ========== ОСНОВНОЙ КОНТЕНТ ==========
 st.title("📊 Аналитик Wildberries")
 st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
+
+st.subheader("💰 Введите дополнительные расходы")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -357,7 +435,21 @@ with col1:
 with col2:
     ad_cost_total = st.number_input("Реклама (общая сумма)", min_value=0.0, value=1000.0, step=500.0)
 
-uploaded_file = st.file_uploader("Загрузите отчёт WB (Excel)", type=["xlsx", "xls"])
+st.subheader("💳 Налоги и комиссии")
+
+col3, col4, col5 = st.columns(3)
+with col3:
+    acquirer_rate = st.number_input("Эквайринг, %", min_value=0.0, value=1.5, step=0.1, help="Комиссия за приём платежей (обычно 1.5-2.5%)")
+with col4:
+    tax_type = st.selectbox("Система налогообложения", ["УСН 6% (доходы)", "УСН 15% (доходы-расходы)"])
+with col5:
+    tax_rate = 6.0 if tax_type == "УСН 6% (доходы)" else 15.0
+    st.metric("Ставка налога", f"{tax_rate:.0f}%")
+
+st.markdown("---")
+st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
+
+uploaded_file = st.file_uploader("Выберите файл", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
@@ -369,10 +461,36 @@ if uploaded_file is not None:
         
         if st.button("🧮 Рассчитать реальную прибыль", type="primary", use_container_width=True):
             with st.spinner("Идёт расчёт..."):
-                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
+                result_df, summary = calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type)
             
             if result_df is not None and not result_df.empty:
-                st.subheader("📈 Результат расчёта")
+                # Итоговая сводка
+                st.subheader("📊 Итоговая сводка")
+                
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("📦 Продано, шт", f"{summary['total_sales']:,}".replace(",", " "))
+                    st.metric("💰 Выручка брутто", f"{summary['total_revenue']:,.0f} ₽".replace(",", " "))
+                with col_b:
+                    st.metric("📦 Расходы всего", f"{(summary['total_purchase'] + summary['total_ad'] + summary['total_acquirer'] + summary['total_logistics'] + summary['total_returns'] + summary['total_storage'] + summary['total_penalties']):,.0f} ₽".replace(",", " "))
+                    st.metric("💰 Закупка", f"{summary['total_purchase']:,.0f} ₽".replace(",", " "))
+                    st.metric("📢 Реклама", f"{summary['total_ad']:,.0f} ₽".replace(",", " "))
+                with col_c:
+                    st.metric("🚚 Логистика", f"{summary['total_logistics']:,.0f} ₽".replace(",", " "))
+                    st.metric("🔄 Возвраты", f"{summary['total_returns']:,.0f} ₽".replace(",", " "))
+                
+                st.markdown("---")
+                
+                col_d, col_e, col_f = st.columns(3)
+                with col_d:
+                    st.metric("💰 Прибыль до налогов", f"{summary['profit_before_tax']:,.0f} ₽".replace(",", " "))
+                with col_e:
+                    st.metric("📊 Налог", f"{summary['tax']:,.0f} ₽".replace(",", " "))
+                with col_f:
+                    st.metric("✅ Чистая прибыль", f"{summary['net_profit']:,.0f} ₽".replace(",", " "))
+                
+                st.markdown("---")
+                st.subheader("📈 Результат по каждому товару")
                 
                 for idx, row in result_df.iterrows():
                     if row["Убыточен?"] == "ДА":
