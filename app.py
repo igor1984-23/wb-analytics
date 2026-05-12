@@ -13,7 +13,7 @@ import hashlib
 VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "admin"
 
-# ВАША РЕАЛЬНАЯ ССЫЛКА (замените на свою)
+# ВАША РЕАЛЬНАЯ ССЫЛКА
 BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
@@ -23,11 +23,17 @@ EMAIL_PASSWORD = "cyoqc6SpdSIUzRkjp3He"
 RECIPIENT_EMAIL = "wb_analitics@mail.ru"
 # ================================
 
-USERS_FILE = "registered_users.csv"
+# Единое имя файла (без пробелов, без проблем)
+USERS_FILE = "users_data.csv"
+
+# Удаляем старые проблемные файлы
+for old_file in ["registered users.csv", "Registered users.csv", "registered_users.csv", "Registered_users.csv"]:
+    if os.path.exists(old_file):
+        os.remove(old_file)
 
 def init_files():
     if not os.path.exists(USERS_FILE):
-        df = pd.DataFrame(columns=["Имя", "Username", "Email", "Телефон", "Дата_регистрации", "Статус"])
+        df = pd.DataFrame(columns=["Имя", "Username", "Email", "Телефон", "Дата_регистрации"])
         df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
 
 def get_user_by_username(username):
@@ -38,16 +44,11 @@ def get_user_by_username(username):
     user_rows = df[df["Username"] == username]
     if not user_rows.empty:
         row = user_rows.iloc[0]
-        # Проверяем наличие колонки Статус (для совместимости со старыми файлами)
-        status = "confirmed"
-        if "Статус" in df.columns:
-            status = row["Статус"]
         return {
             "name": row["Имя"],
             "username": row["Username"],
             "email": row["Email"],
-            "phone": str(row["Телефон"]) if pd.notna(row["Телефон"]) else "",
-            "status": status
+            "phone": str(row["Телефон"]) if pd.notna(row["Телефон"]) else ""
         }
     return None
 
@@ -68,8 +69,7 @@ def save_registration_to_csv(name, username, email, phone):
         "Username": username,
         "Email": email,
         "Телефон": phone,
-        "Дата_регистрации": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Статус": "confirmed"
+        "Дата_регистрации": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }])
     df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(USERS_FILE, index=False, encoding="utf-8-sig")
@@ -83,13 +83,12 @@ def send_welcome_email(user_email, username, name):
         msg['Subject'] = "Добро пожаловать в Аналитик WB"
         body = f"""
         <h2>Здравствуйте, {name}!</h2>
-        <p>Вы успешно зарегистрировались в сервисе «Аналитик WB».</p>
+        <p>Вы успешно зарегистрировались в сервисе.</p>
         <p><strong>Ваши данные для входа:</strong></p>
         <ul>
             <li><strong>Username:</strong> {username}</li>
             <li><strong>Пароль:</strong> {VALID_PASSWORD}</li>
         </ul>
-        <p><a href="{BASE_URL}">Перейти в сервис</a></p>
         """
         msg.attach(MIMEText(body, 'html'))
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
@@ -178,7 +177,6 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         sales_count = len(sales)
         sales_amount = sales[amount_col].sum()
         returns = sku_data[sku_data[doc_type_col].str.contains("возврат", case=False, na=False)]
-        returns_count = len(returns)
         returns_amount = returns[amount_col].sum()
         logistics_sum = sku_data[logistics_col].sum()
         storage_sum = sku_data[storage_col].sum()
@@ -189,56 +187,19 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         purchase_total = sales_count * purchase_per_unit
         final_profit = net_revenue - purchase_total - ad_cost_total
         
-        drr_percent = (ad_cost_total / sales_amount * 100) if sales_amount > 0 else 0
-        return_rate = (returns_count / sales_count * 100) if sales_count > 0 else 0
-        margin_percent = (final_profit / sales_amount * 100) if sales_amount > 0 else 0
-        
         if final_profit >= 0:
-            if margin_percent < 15:
-                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Маржа низкая. Рекомендуем поднять цену на 10% или проверить закупку."
-            else:
-                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Можно увеличить закупку или протестировать повышение цены."
+            hint = f"✅ Товар прибыльный. Реальная прибыль: {final_profit:.0f} ₽"
         else:
-            reasons = []
-            recommendations = []
-            
-            if ad_cost_total > 0 and drr_percent > 30:
-                reasons.append(f"реклама {ad_cost_total:.0f} ₽ ({drr_percent:.1f}% от выручки)")
-                recommendations.append("🔴 Отключите рекламу по этому SKU на неделю")
-            
-            if returns_count > 0 and return_rate > 20:
-                reasons.append(f"возвраты: {returns_count} шт. ({return_rate:.1f}% от продаж)")
-                recommendations.append("🔴 Проверьте качество товара, фото и описание")
-            
-            if logistics_sum > 0:
-                reasons.append(f"логистика {logistics_sum:.0f} ₽")
-                recommendations.append("🔴 Рассмотрите FBS или увеличьте цену")
-            
-            if purchase_total > 0 and margin_percent < -10:
-                reasons.append(f"закупка {purchase_total:.0f} ₽")
-                recommendations.append("🔴 Ищите поставщика дешевле или повышайте цену")
-            
-            if storage_sum > 0:
-                reasons.append(f"хранение {storage_sum:.0f} ₽")
-                recommendations.append("🔴 Уменьшите остатки, заказывайте меньшую партию")
-            
-            if not reasons:
-                reasons.append("различные расходы")
-                recommendations.append("🔴 Рекомендуем временно отключить товар и пересчитать")
-            
-            reason_text = ", ".join(reasons)
-            recommendation_text = " | ".join(recommendations[:2])
-            hint = f"❌ Убыток: {final_profit:.0f} ₽. Причины: {reason_text}. {recommendation_text}."
+            hint = f"❌ Убыток: {final_profit:.0f} ₽. Проверьте расходы."
         
         result.append({
             "Артикул": sku,
             "Продано, шт": sales_count,
-            "Выручка WB (брутто)": sales_amount,
+            "Выручка WB": sales_amount,
             "Возвраты": returns_amount,
             "Расходы WB": total_wb_costs,
-            "Чистая выручка WB": net_revenue,
-            "Закупка (всего)": purchase_total,
-            "Реклама (всего)": ad_cost_total,
+            "Закупка": purchase_total,
+            "Реклама": ad_cost_total,
             "Реальная прибыль": final_profit,
             "Убыточен?": "ДА" if final_profit < 0 else "НЕТ",
             "Комментарий": hint
@@ -246,7 +207,7 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
     
     return pd.DataFrame(result)
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ЗАПУСК ==========
 init_files()
 
 if "authenticated" not in st.session_state:
@@ -256,126 +217,78 @@ if "user_data" not in st.session_state:
 
 st.set_page_config(page_title="Аналитик WB", page_icon="📊")
 
-# ========== ВЫБОР РЕЖИМА ==========
 if not st.session_state.authenticated:
     st.title("📊 Аналитик Wildberries")
-    mode = st.radio("У вас уже есть доступ?", ["🔐 Я новый пользователь", "👋 Я уже зарегистрирован"], horizontal=True)
+    mode = st.radio("", ["🔐 Я новый пользователь", "👋 Я уже зарегистрирован"], horizontal=True)
     
     if mode == "🔐 Я новый пользователь":
-        st.markdown("### Добро пожаловать!")
-        with st.form("registration_form"):
-            name = st.text_input("Ваше имя *")
-            username = st.text_input("Придумайте username (логин) *")
-            email = st.text_input("Ваш email *")
+        with st.form("reg"):
+            name = st.text_input("Имя")
+            username = st.text_input("Username (логин)")
+            email = st.text_input("Email")
             phone = st.text_input("Телефон (необязательно)")
-            submitted = st.form_submit_button("Зарегистрироваться")
-            if submitted:
-                if not name or not username or not email:
-                    st.error("Заполните обязательные поля")
-                elif not re.match(r"^[a-zA-Z0-9_]+$", username):
-                    st.error("Username: только латиница, цифры и _")
-                elif not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
-                    st.error("Некорректный email")
-                else:
-                    success, conflict = save_registration_to_csv(name, username, email, phone)
-                    if not success:
-                        if conflict == "username":
-                            st.error(f"Username '{username}' уже занят")
-                        else:
-                            st.error(f"Email '{email}' уже зарегистрирован")
-                    else:
+            if st.form_submit_button("Зарегистрироваться"):
+                if name and username and email:
+                    ok, err = save_registration_to_csv(name, username, email, phone)
+                    if ok:
                         send_welcome_email(email, username, name)
                         send_admin_notification(name, username, email, phone)
-                        # Автоматический вход после регистрации
-                        st.session_state.user_data = {
-                            "name": name,
-                            "username": username,
-                            "email": email,
-                            "phone": phone,
-                            "status": "confirmed"
-                        }
+                        st.session_state.user_data = {"name": name, "username": username, "email": email, "phone": phone}
                         st.session_state.authenticated = True
                         st.rerun()
-    
+                    else:
+                        st.error(f"Ошибка: {err} уже используется")
+                else:
+                    st.error("Заполните имя, username и email")
     else:
-        st.markdown("#### Введите данные для входа")
-        username_input = st.text_input("Username (логин)")
-        password_input = st.text_input("Пароль", type="password")
+        username = st.text_input("Username")
+        password = st.text_input("Пароль", type="password")
         if st.button("Войти"):
-            if password_input == VALID_PASSWORD:
-                user = get_user_by_username(username_input)
+            if password == VALID_PASSWORD:
+                user = get_user_by_username(username)
                 if user:
                     st.session_state.user_data = user
                     st.session_state.authenticated = True
                     st.rerun()
                 else:
-                    st.error("❌ Неверный username")
+                    st.error("Неверный username")
             else:
                 st.error("Неверный пароль")
     st.stop()
 
-# ========== БОКОВАЯ ПАНЕЛЬ ==========
-with st.sidebar:
-    st.markdown(f"### 👤 {st.session_state.user_data['name']}")
-    st.markdown(f"🔑 {st.session_state.user_data['username']}")
-    st.markdown(f"📧 {st.session_state.user_data['email']}")
-    if st.session_state.user_data.get('phone'):
-        st.markdown(f"📱 {st.session_state.user_data['phone']}")
-    st.markdown("---")
-    if st.button("🚪 Выйти"):
-        for key in st.session_state.keys():
-            del st.session_state[key]
-        st.rerun()
-    st.markdown("---")
-    if st.session_state.user_data['username'] == ADMIN_USERNAME and os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "rb") as f:
-            st.download_button("📥 Скачать список пользователей", data=f, file_name="registered_users.csv", mime="text/csv")
-    st.markdown("---")
-    with st.expander("💬 Отправить обратную связь"):
-        feedback_type = st.selectbox("Тип", ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"])
-        feedback_text = st.text_area("Сообщение", height=150)
-        if st.button("📨 Отправить") and feedback_text.strip():
-            send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], feedback_type, feedback_text)
-            st.success("✅ Отправлено!")
-
 # ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
-st.title("📊 Аналитик Wildberries")
-st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
+with st.sidebar:
+    st.markdown(f"### {st.session_state.user_data['name']}")
+    st.markdown(f"@{st.session_state.user_data['username']}")
+    st.markdown(f"{st.session_state.user_data['email']}")
+    if st.button("Выйти"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
+    with st.expander("Обратная связь"):
+        t = st.selectbox("Тип", ["Идея", "Баг", "Вопрос"])
+        txt = st.text_area("Сообщение")
+        if st.button("Отправить") and txt:
+            send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], t, txt)
+            st.success("Отправлено!")
 
-st.subheader("💰 Введите расходы")
-col1, col2 = st.columns(2)
-with col1:
-    purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", min_value=0.0, value=300.0, step=50.0)
-with col2:
-    ad_cost_total = st.number_input("Реклама (общая сумма)", min_value=0.0, value=1000.0, step=500.0)
+st.title("Аналитик WB")
+st.write(f"Здравствуйте, {st.session_state.user_data['name']}!")
 
-uploaded_file = st.file_uploader("Загрузите отчёт WB (Excel)", type=["xlsx", "xls"])
-if uploaded_file is not None:
-    try:
-        df = pd.read_excel(uploaded_file)
-        st.success(f"Файл загружен, строк: {len(df)}")
-        if st.button("🧮 Рассчитать"):
-            result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
-            if result_df is not None:
-                st.subheader("📈 Результат расчёта")
-                for idx, row in result_df.iterrows():
-                    if row["Убыточен?"] == "ДА":
-                        st.markdown(f"🔴 **{row['Артикул']}** — убыток: {row['Реальная прибыль']:.0f} ₽")
-                        with st.expander("ℹ️ Почему убыток и что делать?"):
-                            st.info(row["Комментарий"])
-                    else:
-                        st.markdown(f"🟢 **{row['Артикул']}** — прибыль: {row['Реальная прибыль']:.0f} ₽")
-                        with st.expander("ℹ️ Детали и рекомендация"):
-                            st.success(row["Комментарий"])
-                with st.expander("📋 Показать полную таблицу"):
-                    def highlight_loss(row):
-                        return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
-                    st.dataframe(result_df.style.apply(highlight_loss, axis=1))
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    result_df.to_excel(writer, sheet_name='Анализ', index=False)
-                st.download_button("📥 Скачать отчёт", data=output.getvalue(), file_name="unit_economy.xlsx")
-    except Exception as e:
-        st.error(f"Ошибка: {e}")
+purchase = st.number_input("Закупка (1 ед.)", value=300.0)
+ad = st.number_input("Реклама (всего)", value=1000.0)
+file = st.file_uploader("Отчёт WB", type=["xlsx", "xls"])
 
-st.caption("Аналитик WB — автоматический расчёт юнит-экономики")
+if file:
+    df = pd.read_excel(file)
+    if st.button("Рассчитать"):
+        res = calculate_unit_economy(df, purchase, ad)
+        if res is not None:
+            for _, row in res.iterrows():
+                if row["Убыточен?"] == "ДА":
+                    st.markdown(f"🔴 **{row['Артикул']}**: {row['Комментарий']}")
+                else:
+                    st.markdown(f"🟢 **{row['Артикул']}**: {row['Комментарий']}")
+            out = io.BytesIO()
+            res.to_excel(out, index=False)
+            st.download_button("Скачать Excel", out.getvalue(), "report.xlsx")
