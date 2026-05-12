@@ -13,7 +13,7 @@ VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "gritzner"
 
 # ВАША РЕАЛЬНАЯ ССЫЛКА
-BASE_URL = "https://wb-analytics-mqxvuxfayhh5h5s3nqbq3ti.streamlit.app"
+BASE_URL = "https://wb-analytics-mqxvuxfayh5h5s3nqbq3ti.streamlit.app"
 
 SMTP_SERVER = "smtp.mail.ru"
 SMTP_PORT = 587
@@ -136,7 +136,7 @@ def send_feedback_email(user_name, username, user_email, feedback_type, feedback
         print(f"Ошибка отправки feedback: {e}")
         return False
 
-def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
+def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type):
     df.columns = df.columns.str.strip().str.lower()
     sku_col = None
     doc_type_col = None
@@ -164,12 +164,22 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
     
     if not all([sku_col, doc_type_col, amount_col, logistics_col, storage_col, penalties_col, other_col]):
         st.error("Не найдены нужные колонки")
-        return None
+        return None, None
     
     for col in [amount_col, logistics_col, storage_col, penalties_col, other_col]:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     
     result = []
+    total_sales_count = 0
+    total_sales_amount = 0
+    total_net_revenue = 0
+    total_purchase = 0
+    total_ad_cost = 0
+    total_logistics = 0
+    total_returns_amount = 0
+    total_storage = 0
+    total_penalties = 0
+    
     for sku in df[sku_col].unique():
         sku_data = df[df[sku_col] == sku]
         
@@ -189,14 +199,29 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
         total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
         net_revenue = sales_amount + returns_amount - total_wb_costs
         purchase_total = sales_count * purchase_per_unit
-        final_profit = net_revenue - purchase_total - ad_cost_total
+        
+        # Эквайринг
+        acquirer_cost = sales_amount * (acquirer_rate / 100)
+        
+        final_profit = net_revenue - purchase_total - ad_cost_total - acquirer_cost
+        
+        # Накопление для сводки
+        total_sales_count += sales_count
+        total_sales_amount += sales_amount
+        total_net_revenue += net_revenue
+        total_purchase += purchase_total
+        total_ad_cost += ad_cost_total
+        total_logistics += logistics_sum
+        total_returns_amount += returns_amount
+        total_storage += storage_sum
+        total_penalties += penalties_sum
         
         # Расчёт процентов
         drr_percent = (ad_cost_total / sales_amount * 100) if sales_amount > 0 else 0
         return_rate = (returns_count / sales_count * 100) if sales_count > 0 else 0
         margin_percent = (final_profit / sales_amount * 100) if sales_amount > 0 else 0
         
-        # Генерация умной рекомендации
+        # Генерация рекомендации
         if final_profit >= 0:
             if margin_percent < 15:
                 hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Маржа низкая. Рекомендуем поднять цену на 10% или найти поставщика дешевле."
@@ -244,12 +269,43 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
             "Чистая выручка WB": net_revenue,
             "Закупка (всего)": purchase_total,
             "Реклама (всего)": ad_cost_total,
+            "Эквайринг": acquirer_cost,
             "Реальная прибыль": final_profit,
             "Убыточен?": "ДА" if final_profit < 0 else "НЕТ",
             "Комментарий": hint
         })
     
-    return pd.DataFrame(result)
+    # Итоговая сводка
+    total_acquirer = total_sales_amount * (acquirer_rate / 100)
+    total_expenses = total_purchase + total_ad_cost + total_acquirer + total_logistics + abs(total_returns_amount) + total_storage + total_penalties
+    profit_before_tax = total_net_revenue - total_expenses
+    
+    if tax_type == "УСН 6% (доходы)":
+        tax = total_sales_amount * 0.06
+    else:
+        tax = profit_before_tax * (tax_rate / 100) if profit_before_tax > 0 else 0
+    
+    net_profit = profit_before_tax - tax
+    
+    summary = {
+        "total_sales": total_sales_count,
+        "total_revenue": total_sales_amount,
+        "total_net_revenue": total_net_revenue,
+        "total_purchase": total_purchase,
+        "total_ad": total_ad_cost,
+        "total_acquirer": total_acquirer,
+        "total_logistics": total_logistics,
+        "total_returns": abs(total_returns_amount),
+        "total_storage": total_storage,
+        "total_penalties": total_penalties,
+        "profit_before_tax": profit_before_tax,
+        "tax": tax,
+        "net_profit": net_profit,
+        "tax_type": tax_type,
+        "tax_rate": tax_rate
+    }
+    
+    return pd.DataFrame(result), summary
 
 # ========== ЗАПУСК ==========
 init_files()
@@ -298,7 +354,7 @@ if not st.session_state.authenticated:
                     else:
                         st.error(f"Ошибка: {err} уже используется")
     
-    else:  # режим входа
+    else:
         with st.form("login_form"):
             username = st.text_input("Username (логин)")
             password = st.text_input("Пароль", type="password")
@@ -318,7 +374,7 @@ if not st.session_state.authenticated:
     
     st.stop()
 
-# ========== ОСНОВНОЙ ИНТЕРФЕЙС (после входа) ==========
+# ========== ОСНОВНОЙ ИНТЕРФЕЙС ==========
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.user_data['name']}")
     st.markdown(f"🔑 {st.session_state.user_data['username']}")
@@ -334,16 +390,9 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Кнопка скачивания списка пользователей (только для админа)
     if st.session_state.user_data['username'] == ADMIN_USERNAME and os.path.exists(USERS_FILE):
         with open(USERS_FILE, "rb") as f:
-            st.download_button(
-                label="📥 Скачать список пользователей",
-                data=f,
-                file_name="users_data.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button("📥 Скачать список пользователей", data=f, file_name="users_data.csv", mime="text/csv", use_container_width=True)
     
     st.markdown("---")
     
@@ -368,21 +417,23 @@ st.subheader("💰 Введите дополнительные расходы")
 
 col1, col2 = st.columns(2)
 with col1:
-    purchase_per_unit = st.number_input(
-        "Закупка (себестоимость 1 единицы)",
-        min_value=0.0,
-        value=300.0,
-        step=50.0,
-        help="Сколько вы платите за одну штуку товара поставщику"
-    )
+    purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", min_value=0.0, value=300.0, step=50.0)
 with col2:
-    ad_cost_total = st.number_input(
-        "Реклама (общая сумма за период)",
-        min_value=0.0,
-        value=1000.0,
-        step=500.0,
-        help="Сколько вы потратили на рекламу за эту неделю"
-    )
+    ad_cost_total = st.number_input("Реклама (общая сумма)", min_value=0.0, value=1000.0, step=500.0)
+
+st.subheader("💳 Налоги и комиссии")
+
+col3, col4, col5 = st.columns(3)
+with col3:
+    acquirer_rate = st.number_input("Эквайринг, %", min_value=0.0, value=1.5, step=0.1, help="Комиссия за приём платежей (обычно 1.5-2.5%)")
+with col4:
+    tax_type = st.selectbox("Система налогообложения", ["УСН 6% (доходы)", "УСН 15% (доходы-расходы)"])
+with col5:
+    if tax_type == "УСН 15% (доходы-расходы)":
+        tax_rate = 15.0
+    else:
+        tax_rate = 6.0
+    st.metric("Ставка налога", f"{tax_rate:.0f}%")
 
 st.markdown("---")
 st.write("Загрузите отчёт WB в формате Excel — получите анализ убыточных товаров.")
@@ -399,12 +450,40 @@ if uploaded_file is not None:
         
         if st.button("🧮 Рассчитать реальную прибыль", type="primary", use_container_width=True):
             with st.spinner("Идёт расчёт..."):
-                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
+                result_df, summary = calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type)
             
             if result_df is not None and not result_df.empty:
-                st.subheader("📈 Результат расчёта")
+                # Итоговая сводка
+                st.subheader("📊 Итоговая сводка")
                 
-                # Отображаем каждый товар с рекомендацией
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("📦 Продано, шт", f"{summary['total_sales']:,}".replace(",", " "))
+                    st.metric("💰 Выручка брутто", f"{summary['total_revenue']:,.0f} ₽".replace(",", " "))
+                    st.metric("📦 Чистая выручка WB", f"{summary['total_net_revenue']:,.0f} ₽".replace(",", " "))
+                with col_b:
+                    st.metric("📦 Расходы всего", f"{summary['total_purchase'] + summary['total_ad'] + summary['total_acquirer'] + summary['total_logistics'] + summary['total_returns'] + summary['total_storage'] + summary['total_penalties']:,.0f} ₽".replace(",", " "))
+                    st.metric("💰 Закупка", f"{summary['total_purchase']:,.0f} ₽".replace(",", " "))
+                    st.metric("📢 Реклама", f"{summary['total_ad']:,.0f} ₽".replace(",", " "))
+                    st.metric("💳 Эквайринг", f"{summary['total_acquirer']:,.0f} ₽".replace(",", " "))
+                with col_c:
+                    st.metric("🚚 Логистика", f"{summary['total_logistics']:,.0f} ₽".replace(", ", " "))
+                    st.metric("🔄 Возвраты", f"{summary['total_returns']:,.0f} ₽".replace(",", " "))
+                    st.metric("📦 Хранение + штрафы", f"{summary['total_storage'] + summary['total_penalties']:,.0f} ₽".replace(",", " "))
+                
+                st.markdown("---")
+                
+                col_d, col_e, col_f = st.columns(3)
+                with col_d:
+                    st.metric("💰 Прибыль до налогов", f"{summary['profit_before_tax']:,.0f} ₽".replace(",", " "))
+                with col_e:
+                    st.metric("📊 Налог", f"{summary['tax']:,.0f} ₽".replace(",", " "))
+                with col_f:
+                    st.metric("✅ Чистая прибыль", f"{summary['net_profit']:,.0f} ₽".replace(",", " "), delta=f"{summary['net_profit'] / summary['total_revenue'] * 100:.1f}% от выручки" if summary['total_revenue'] > 0 else None)
+                
+                st.markdown("---")
+                st.subheader("📈 Результат по каждому товару")
+                
                 for idx, row in result_df.iterrows():
                     if row["Убыточен?"] == "ДА":
                         st.markdown(f"🔴 **{row['Артикул']}**")
@@ -414,27 +493,16 @@ if uploaded_file is not None:
                         st.success(row["Комментарий"])
                     st.markdown("---")
                 
-                # Полная таблица под раскрывающимся блоком
-                with st.expander("📋 Показать полную таблицу со всеми данными"):
+                with st.expander("📋 Показать полную таблицу"):
                     def highlight_loss(row):
                         return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
                     st.dataframe(result_df.style.apply(highlight_loss, axis=1))
                 
-                # Кнопка скачать
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     result_df.to_excel(writer, sheet_name='Юнит-экономика', index=False)
-                st.download_button(
-                    label="📥 Скачать отчёт (Excel)",
-                    data=output.getvalue(),
-                    file_name="unit_economy_result.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            else:
-                st.error("Не удалось выполнить расчёт. Проверьте структуру файла.")
+                st.download_button("📥 Скачать отчёт (Excel)", data=output.getvalue(), file_name="unit_economy_result.xlsx")
     except Exception as e:
-        st.error(f"Ошибка при обработке файла: {e}")
+        st.error(f"Ошибка: {e}")
 
-st.markdown("---")
 st.caption("Аналитик WB — автоматический расчёт юнит-экономики по отчётам Wildberries")
