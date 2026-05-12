@@ -134,7 +134,7 @@ def send_feedback_email(user_name, username, user_email, feedback_type, feedback
         print(f"Ошибка: {e}")
         return False
 
-def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type, sku_ad_manual):
+def calculate_unit_economy(df, purchase_per_unit, acquirer_rate, tax_rate, tax_type, sku_ad_manual):
     df.columns = df.columns.str.strip().str.lower()
     sku_col = None
     doc_type_col = None
@@ -166,36 +166,6 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, 
     
     for col in [amount_col, logistics_col, storage_col, penalties_col, other_col]:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    # Собираем выручку по товарам для распределения рекламы
-    sku_revenue = {}
-    for sku in df[sku_col].unique():
-        sku_data = df[df[sku_col] == sku]
-        sales = sku_data[sku_data[doc_type_col].str.contains("продажа", case=False, na=False)]
-        sales_amount = sales[amount_col].sum()
-        sku_revenue[sku] = sales_amount
-    
-    total_revenue = sum(sku_revenue.values())
-    
-    # Определяем рекламу по каждому товару (ручной ввод или автоматический)
-    sku_ad_cost = {}
-    total_manual_ad = sum(sku_ad_manual.get(sku, 0) for sku in sku_revenue.keys())
-    
-    if total_manual_ad > 0:
-        # Используем ручной ввод
-        for sku in sku_revenue.keys():
-            sku_ad_cost[sku] = sku_ad_manual.get(sku, 0)
-        # Корректируем общую сумму рекламы для сводки
-        actual_ad_total = total_manual_ad
-    else:
-        # Автоматическое распределение
-        actual_ad_total = ad_cost_total
-        if total_revenue > 0 and actual_ad_total > 0:
-            for sku, revenue in sku_revenue.items():
-                sku_ad_cost[sku] = actual_ad_total * (revenue / total_revenue)
-        else:
-            for sku in sku_revenue.keys():
-                sku_ad_cost[sku] = 0
     
     result = []
     total_sales_count = 0
@@ -230,7 +200,7 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, 
         purchase_total = sales_count * purchase_per_unit
         
         acquirer_cost = sales_amount * (acquirer_rate / 100)
-        ad_cost_for_sku = sku_ad_cost.get(sku, 0)
+        ad_cost_for_sku = sku_ad_manual.get(sku, 0)
         
         final_profit = net_revenue - purchase_total - ad_cost_for_sku - acquirer_cost
         
@@ -442,8 +412,6 @@ st.subheader("💰 Введите дополнительные расходы")
 col1, col2 = st.columns(2)
 with col1:
     purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", min_value=0.0, value=300.0, step=50.0)
-with col2:
-    ad_cost_total = st.number_input("Реклама (общая сумма для автораспределения)", min_value=0.0, value=1000.0, step=500.0, help="Если не заполните ручной ввод ниже, реклама распределится пропорционально выручке")
 
 st.subheader("💳 Налоги и комиссии")
 
@@ -477,21 +445,18 @@ if uploaded_file is not None:
         
         unique_skus = temp_df[sku_col].unique().tolist() if sku_col else []
         
-        st.subheader("🎯 Реклама по каждому товару (опционально)")
-        st.info("Если заполните поля ниже — они имеют приоритет над общей суммой. Оставьте пустыми, чтобы использовать автораспределение.")
+        st.subheader("🎯 Реклама по каждому товару")
+        st.info("Введите сумму рекламы для каждого товара. Если поле оставить пустым — реклама считается 0.")
         
         sku_ad_manual = {}
-        cols_per_row = 2
-        for i, sku in enumerate(unique_skus):
-            col = st.columns(cols_per_row)[i % cols_per_row]
-            with col:
-                ad_val = st.number_input(f"{sku}", min_value=0.0, value=0.0, step=100.0, key=f"ad_{sku}")
-                if ad_val > 0:
-                    sku_ad_manual[sku] = ad_val
+        for sku in unique_skus:
+            ad_val = st.number_input(f"Реклама для {sku}", min_value=0.0, value=0.0, step=100.0, key=f"ad_{sku}")
+            if ad_val > 0:
+                sku_ad_manual[sku] = ad_val
         
         if st.button("🧮 Рассчитать реальную прибыль", type="primary", use_container_width=True):
             with st.spinner("Идёт расчёт..."):
-                result_df, summary = calculate_unit_economy(df, purchase_per_unit, ad_cost_total, acquirer_rate, tax_rate, tax_type, sku_ad_manual)
+                result_df, summary = calculate_unit_economy(df, purchase_per_unit, acquirer_rate, tax_rate, tax_type, sku_ad_manual)
             
             if result_df is not None and not result_df.empty:
                 # Итоговая сводка
@@ -524,7 +489,6 @@ if uploaded_file is not None:
                 st.subheader("📈 Результат по каждому товару")
                 
                 for idx, row in result_df.iterrows():
-                    ad_display = f", реклама {row['Реклама']:.0f} ₽" if row['Реклама'] > 0 else ""
                     if row["Убыточен?"] == "ДА":
                         st.markdown(f"🔴 **{row['Артикул']}**")
                         st.info(row["Комментарий"])
