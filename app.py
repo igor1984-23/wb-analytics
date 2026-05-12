@@ -7,7 +7,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
 import re
-import hashlib
 
 # ========== НАСТРОЙКИ ==========
 VALID_PASSWORD = "secret123"
@@ -23,7 +22,6 @@ EMAIL_PASSWORD = "cyoqc6SpdSIUzRkjp3He"
 RECIPIENT_EMAIL = "wb_analitics@mail.ru"
 # ================================
 
-# Единое имя файла (без пробелов, без проблем)
 USERS_FILE = "users_data.csv"
 
 # Удаляем старые проблемные файлы
@@ -173,33 +171,78 @@ def calculate_unit_economy(df, purchase_per_unit, ad_cost_total):
     result = []
     for sku in df[sku_col].unique():
         sku_data = df[df[sku_col] == sku]
+        
         sales = sku_data[sku_data[doc_type_col].str.contains("продажа", case=False, na=False)]
         sales_count = len(sales)
         sales_amount = sales[amount_col].sum()
+        
         returns = sku_data[sku_data[doc_type_col].str.contains("возврат", case=False, na=False)]
+        returns_count = len(returns)
         returns_amount = returns[amount_col].sum()
+        
         logistics_sum = sku_data[logistics_col].sum()
         storage_sum = sku_data[storage_col].sum()
         penalties_sum = sku_data[penalties_col].sum()
         other_sum = sku_data[other_col].sum()
+        
         total_wb_costs = logistics_sum + storage_sum + penalties_sum + other_sum
         net_revenue = sales_amount + returns_amount - total_wb_costs
         purchase_total = sales_count * purchase_per_unit
         final_profit = net_revenue - purchase_total - ad_cost_total
         
+        # Расчёт процентов
+        drr_percent = (ad_cost_total / sales_amount * 100) if sales_amount > 0 else 0
+        return_rate = (returns_count / sales_count * 100) if sales_count > 0 else 0
+        margin_percent = (final_profit / sales_amount * 100) if sales_amount > 0 else 0
+        
+        # Генерация умной рекомендации
         if final_profit >= 0:
-            hint = f"✅ Товар прибыльный. Реальная прибыль: {final_profit:.0f} ₽"
+            if margin_percent < 15:
+                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Маржа низкая. Рекомендуем поднять цену на 10% или найти поставщика дешевле."
+            else:
+                hint = f"✅ Товар прибыльный ({final_profit:.0f} ₽, маржа {margin_percent:.1f}%). Можно увеличить закупку или протестировать повышение цены."
         else:
-            hint = f"❌ Убыток: {final_profit:.0f} ₽. Проверьте расходы."
+            reasons = []
+            recommendations = []
+            
+            if ad_cost_total > 0 and drr_percent > 30:
+                reasons.append(f"реклама {ad_cost_total:.0f} ₽ ({drr_percent:.1f}% от выручки)")
+                recommendations.append("Отключите рекламу по этому SKU на неделю")
+            
+            if returns_count > 0 and return_rate > 20:
+                reasons.append(f"возвраты: {returns_count} шт. ({return_rate:.1f}% от продаж)")
+                recommendations.append("Проверьте качество товара, фото и описание")
+            
+            if logistics_sum > 0:
+                reasons.append(f"логистика {logistics_sum:.0f} ₽")
+                recommendations.append("Рассмотрите FBS (доставка со своего склада) или увеличьте цену")
+            
+            if purchase_total > 0 and margin_percent < -10:
+                reasons.append(f"закупка {purchase_total:.0f} ₽")
+                recommendations.append("Ищите поставщика дешевле или повышайте цену")
+            
+            if storage_sum > 0:
+                reasons.append(f"хранение {storage_sum:.0f} ₽")
+                recommendations.append("Уменьшите остатки, заказывайте меньшую партию")
+            
+            if not reasons:
+                reasons.append("различные расходы")
+                recommendations.append("Временно отключите товар и пересчитайте")
+            
+            reason_text = ", ".join(reasons)
+            recommendation_text = " | ".join(recommendations[:2])
+            
+            hint = f"❌ Убыток: {final_profit:.0f} ₽. Причины: {reason_text}. 🔧 {recommendation_text}."
         
         result.append({
             "Артикул": sku,
             "Продано, шт": sales_count,
-            "Выручка WB": sales_amount,
+            "Выручка WB (брутто)": sales_amount,
             "Возвраты": returns_amount,
             "Расходы WB": total_wb_costs,
-            "Закупка": purchase_total,
-            "Реклама": ad_cost_total,
+            "Чистая выручка WB": net_revenue,
+            "Закупка (всего)": purchase_total,
+            "Реклама (всего)": ad_cost_total,
             "Реальная прибыль": final_profit,
             "Убыточен?": "ДА" if final_profit < 0 else "НЕТ",
             "Комментарий": hint
@@ -266,29 +309,61 @@ with st.sidebar:
             del st.session_state[k]
         st.rerun()
     with st.expander("Обратная связь"):
-        t = st.selectbox("Тип", ["Идея", "Баг", "Вопрос"])
-        txt = st.text_area("Сообщение")
-        if st.button("Отправить") and txt:
+        t = st.selectbox("Тип", ["💡 Идея", "🐛 Баг", "❓ Вопрос", "📝 Другое"])
+        txt = st.text_area("Сообщение", height=150)
+        if st.button("📨 Отправить") and txt:
             send_feedback_email(st.session_state.user_data['name'], st.session_state.user_data['username'], st.session_state.user_data['email'], t, txt)
             st.success("Отправлено!")
 
-st.title("Аналитик WB")
-st.write(f"Здравствуйте, {st.session_state.user_data['name']}!")
+st.title("📊 Аналитик Wildberries")
+st.write(f"Здравствуйте, **{st.session_state.user_data['name']}**!")
 
-purchase = st.number_input("Закупка (1 ед.)", value=300.0)
-ad = st.number_input("Реклама (всего)", value=1000.0)
-file = st.file_uploader("Отчёт WB", type=["xlsx", "xls"])
+col1, col2 = st.columns(2)
+with col1:
+    purchase_per_unit = st.number_input("Закупка (себестоимость 1 ед.)", value=300.0, step=50.0)
+with col2:
+    ad_cost_total = st.number_input("Реклама (общая сумма)", value=1000.0, step=500.0)
 
-if file:
-    df = pd.read_excel(file)
-    if st.button("Рассчитать"):
-        res = calculate_unit_economy(df, purchase, ad)
-        if res is not None:
-            for _, row in res.iterrows():
-                if row["Убыточен?"] == "ДА":
-                    st.markdown(f"🔴 **{row['Артикул']}**: {row['Комментарий']}")
-                else:
-                    st.markdown(f"🟢 **{row['Артикул']}**: {row['Комментарий']}")
-            out = io.BytesIO()
-            res.to_excel(out, index=False)
-            st.download_button("Скачать Excel", out.getvalue(), "report.xlsx")
+uploaded_file = st.file_uploader("Загрузите отчёт WB (Excel)", type=["xlsx", "xls"])
+
+if uploaded_file is not None:
+    try:
+        df = pd.read_excel(uploaded_file)
+        st.success(f"Файл загружен, строк: {len(df)}")
+        
+        if st.button("🧮 Рассчитать реальную прибыль", type="primary"):
+            with st.spinner("Идёт расчёт..."):
+                result_df = calculate_unit_economy(df, purchase_per_unit, ad_cost_total)
+            
+            if result_df is not None and not result_df.empty:
+                st.subheader("📈 Результат расчёта")
+                
+                for idx, row in result_df.iterrows():
+                    if row["Убыточен?"] == "ДА":
+                        st.markdown(f"🔴 **{row['Артикул']}**")
+                        st.info(row["Комментарий"])
+                    else:
+                        st.markdown(f"🟢 **{row['Артикул']}**")
+                        st.success(row["Комментарий"])
+                    st.markdown("---")
+                
+                # Полная таблица под раскрывающимся блоком
+                with st.expander("📋 Показать полную таблицу"):
+                    def highlight_loss(row):
+                        return ['background-color: #ffcccc' if row['Убыточен?'] == 'ДА' else '' for _ in row]
+                    st.dataframe(result_df.style.apply(highlight_loss, axis=1))
+                
+                # Кнопка скачать
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    result_df.to_excel(writer, sheet_name='Юнит-экономика', index=False)
+                st.download_button(
+                    label="📥 Скачать отчёт (Excel)",
+                    data=output.getvalue(),
+                    file_name="unit_economy_result.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+    except Exception as e:
+        st.error(f"Ошибка: {e}")
+
+st.caption("Автоматический расчёт юнит-экономики по отчётам WB")
