@@ -13,7 +13,7 @@ VALID_PASSWORD = "secret123"
 ADMIN_USERNAME = "admin"
 
 # ВАША РЕАЛЬНАЯ ССЫЛКА
-BASE_URL = "https://wb-analytics-mqxvuxfayhh5h5s3nqbq3ti.streamlit.app""
+BASE_URL ="https://wb-analytics-mqxvuxfayhh5h5s3nqbq3ti.streamlit.app""
 
 SMTP_SERVER = "smtp.mail.ru"
 SMTP_PORT = 587
